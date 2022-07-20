@@ -16,7 +16,6 @@
 include!(concat!(env!("OUT_DIR"), "/starpu_coherency.rs"));
 include!(concat!(env!("OUT_DIR"), "/starpu_mpi.rs"));
 use ::core::ffi::*;
-use localmacros::*;
 mod core;
 mod redux;
 use crate::core::{HandleData, HandleManager, Rank, RecvReq, SendReq, Tag};
@@ -472,19 +471,27 @@ fn barrier() {
     debug!("[{}] Barrier done", rank);
 }
 
-#[starpu_mpi_func]
-fn starpu_mpi_insert_task(_comm: MPI_Comm, codelet: *mut starpu_codelet, mut args: ...) -> c_int {
+#[no_mangle]
+pub unsafe extern "C" fn starpu_mpi_insert_task(
+    _comm: MPI_Comm,
+    codelet: *mut starpu_codelet,
+    mut args: ...
+) -> c_int {
     task_insert_v(codelet, args.as_va_list())
 }
 
-#[starpu_mpi_func]
-fn starpu_mpi_task_insert(_comm: MPI_Comm, codelet: *mut starpu_codelet, mut args: ...) -> c_int {
+#[no_mangle]
+pub unsafe extern "C" fn starpu_mpi_task_insert(
+    _comm: MPI_Comm,
+    codelet: *mut starpu_codelet,
+    mut args: ...
+) -> c_int {
     task_insert_v(codelet, args.as_va_list())
 }
 
 #[doc = "Call starpu_mpi_init_comm() with the MPI communicator \\c MPI_COMM_WORLD."]
-#[starpu_mpi_func]
-fn starpu_mpi_init(
+#[no_mangle]
+pub unsafe extern "C" fn starpu_mpi_init(
     _argc: *mut c_int,
     _argv: *mut *mut *mut c_char,
     _initialize_mpi: c_int,
@@ -496,8 +503,8 @@ fn starpu_mpi_init(
 #[doc = "Register to MPI a StarPU data handle with the given tag, rank and MPI"]
 #[doc = "communicator. It also automatically clears the MPI communication cache"]
 #[doc = "when unregistering the data."]
-#[starpu_mpi_func]
-fn starpu_mpi_data_register_comm(
+#[no_mangle]
+pub unsafe extern "C" fn starpu_mpi_data_register_comm(
     data_handle: starpu_data_handle_t,
     data_tag: starpu_mpi_tag_t,
     rank: c_int,
@@ -510,15 +517,15 @@ fn starpu_mpi_data_register_comm(
 }
 
 #[doc = "Return the rank of the given data."]
-#[starpu_mpi_func]
-fn starpu_mpi_data_get_rank(handle: starpu_data_handle_t) -> c_int {
+#[no_mangle]
+pub unsafe extern "C" fn starpu_mpi_data_get_rank(handle: starpu_data_handle_t) -> c_int {
     data_from_handle(handle).rank().into()
 }
 
 #[doc = "Wait until all StarPU tasks and communications for the given"]
 #[doc = "communicator are completed."]
-#[starpu_mpi_func]
-fn starpu_mpi_wait_for_all(_comm: MPI_Comm) -> c_int {
+#[no_mangle]
+pub unsafe extern "C" fn starpu_mpi_wait_for_all(_comm: MPI_Comm) -> c_int {
     wait_for_all();
     barrier();
     0
@@ -526,8 +533,8 @@ fn starpu_mpi_wait_for_all(_comm: MPI_Comm) -> c_int {
 
 #[doc = "Perform a reduction on the given data \\p handle. All nodes send the"]
 #[doc = "data to its owner node which will perform a reduction."]
-#[starpu_mpi_func]
-fn starpu_mpi_redux_data(_comm: MPI_Comm, data_handle: starpu_data_handle_t) {
+#[no_mangle]
+pub unsafe extern "C" fn starpu_mpi_redux_data(_comm: MPI_Comm, data_handle: starpu_data_handle_t) {
     redux::perform(data_handle);
 }
 
@@ -536,16 +543,20 @@ fn starpu_mpi_redux_data(_comm: MPI_Comm, data_handle: starpu_data_handle_t) {
 #[doc = "point of task graph submission by all the MPI nodes. The function"]
 #[doc = "does nothing if the cache mechanism is disabled (see \\ref"]
 #[doc = "STARPU_MPI_CACHE)."]
-#[starpu_mpi_func]
-fn starpu_mpi_cache_flush_all_data(_comm: MPI_Comm) {
+#[no_mangle]
+pub unsafe extern "C" fn starpu_mpi_cache_flush_all_data(_comm: MPI_Comm) {
     // TODO implement
 }
 
 #[doc = "Transfer data \\p data_handle to MPI node \\p node, sending it from"]
 #[doc = "its owner if needed. At least the target node and the owner have to"]
 #[doc = "call the function."]
-#[starpu_mpi_func]
-fn starpu_mpi_get_data_on_node(_comm: MPI_Comm, handle: starpu_data_handle_t, node: c_int) {
+#[no_mangle]
+pub unsafe extern "C" fn starpu_mpi_get_data_on_node(
+    _comm: MPI_Comm,
+    handle: starpu_data_handle_t,
+    node: c_int,
+) {
     let node = node as Rank;
     let s = singleton();
     let d = data_from_handle(handle);
@@ -565,8 +576,8 @@ fn starpu_mpi_get_data_on_node(_comm: MPI_Comm, handle: starpu_data_handle_t, no
 #[doc = "\\c starpu_mpi functions and before the call to starpu_shutdown(),"]
 #[doc = "if any. \\c MPI_Finalize() will be called if StarPU-MPI has been"]
 #[doc = "initialized by starpu_mpi_init()."]
-#[starpu_mpi_func]
-fn starpu_mpi_shutdown() -> c_int {
+#[no_mangle]
+pub unsafe extern "C" fn starpu_mpi_shutdown() -> c_int {
     singleton().shutdown();
     0
 }

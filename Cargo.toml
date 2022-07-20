@@ -9,7 +9,6 @@ name         = "starpumpi"
 crate-type   = ["cdylib"]
 
 [dependencies]
-localmacros = {path = "localmacros"}
 pnet = "0.30.0"
 ipnetwork = "0.19.0" # use the version required by pnet
 env_logger = "0.9.0"

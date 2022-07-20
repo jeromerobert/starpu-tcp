@@ -1,9 +1,0 @@
-[package]
-name = "localmacros"
-version = "0.1.0"
-[lib]
-proc-macro = true
-[dependencies]
-syn = { version = "*", features = ["full", "printing"] }
-quote = "*"
-proc-macro2 = "*"
