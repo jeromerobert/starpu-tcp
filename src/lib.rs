@@ -586,3 +586,47 @@ pub unsafe extern "C" fn starpu_mpi_shutdown() -> c_int {
     singleton().shutdown();
     0
 }
+
+#[doc = "Post a standard-mode, non blocking send of \\p data_handle to the"]
+#[doc = "node \\p dest using the message tag \\p data_tag within the"]
+#[doc = "communicator \\p comm. On completion, the \\p callback function is"]
+#[doc = "called with the argument \\p arg."]
+#[doc = "Similarly to the pthread detached functionality, when a detached"]
+#[doc = "communication completes, its resources are automatically released"]
+#[doc = "back to the system, there is no need to test or to wait for the"]
+#[doc = "completion of the request."]
+#[no_mangle]
+pub unsafe extern "C" fn starpu_mpi_isend_detached(
+    _data_handle: starpu_data_handle_t,
+    _dest: c_int,
+    _data_tag: starpu_mpi_tag_t,
+    _comm: MPI_Comm,
+    _callback: Option<unsafe extern "C" fn(arg1: *mut c_void)>,
+    _arg: *mut c_void,
+) -> c_int {
+    // TODO: It's almost just calling send but we are missing the callback
+    // management
+    todo!()
+}
+
+#[doc = "Post a nonblocking receive in \\p data_handle from the node \\p"]
+#[doc = "source using the message tag \\p data_tag within the communicator \\p"]
+#[doc = "comm. On completion, the \\p callback function is called with the"]
+#[doc = "argument \\p arg."]
+#[doc = "Similarly to the pthread detached functionality, when a detached"]
+#[doc = "communication completes, its resources are automatically released"]
+#[doc = "back to the system, there is no need to test or to wait for the"]
+#[doc = "completion of the request."]
+#[no_mangle]
+pub unsafe extern "C" fn starpu_mpi_irecv_detached(
+    _data_handle: starpu_data_handle_t,
+    _source: c_int,
+    _data_tag: starpu_mpi_tag_t,
+    _comm: MPI_Comm,
+    _callback: Option<unsafe extern "C" fn(arg1: *mut c_void)>,
+    _arg: *mut c_void,
+) -> c_int {
+    // TODO: It's almost just calling recv but we are missing the callback
+    // management
+    todo!();
+}
