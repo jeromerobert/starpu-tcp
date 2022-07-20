@@ -11,16 +11,14 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::useless_transmute)]
 #![feature(c_variadic)] // https://github.com/rust-lang/rust/issues/44930
-#![feature(core_ffi_c)] // https://github.com/rust-lang/rust/issues/94501
 #![feature(const_maybe_uninit_zeroed)] // https://github.com/rust-lang/rust/issues/91850
 include!(concat!(env!("OUT_DIR"), "/starpu_coherency.rs"));
 include!(concat!(env!("OUT_DIR"), "/starpu_mpi.rs"));
-use ::core::ffi::*;
 mod core;
 mod redux;
 use crate::core::{HandleData, HandleManager, Rank, RecvReq, SendReq, Tag};
-use std::mem::MaybeUninit;
-use std::sync::Once;
+use std::{ffi::VaList, mem::MaybeUninit, sync::Once};
+use std::os::raw::{c_char, c_int, c_uint, c_ulong, c_void};
 extern crate log;
 use log::*;
 
