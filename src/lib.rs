@@ -262,19 +262,20 @@ pub fn exchange_data_before_execution(
     }
 }
 
-unsafe fn task_insert_v(codelet: *mut starpu_codelet, args: VaList) -> c_int {
+fn task_insert_v(codelet: *mut starpu_codelet, args: VaList) -> c_int {
     let me = singleton().rank();
-    let task = starpu_task_create();
-    assert_eq!((*task).magic, 42);
-    let xrank = task_insert_create(&mut *codelet, &mut *task, args);
-    let prio = (*task).priority;
+    let ptask = unsafe { starpu_task_create() };
+    let task = unsafe { &mut *ptask };
+    assert_eq!(task.magic, 42);
+    let xrank = unsafe { task_insert_create(&mut *codelet, task, args) };
+    let prio = task.priority;
     // clone handles and modes because starpu_task_submit may delete the task
-    let handles: Vec<starpu_data_handle_t> = (*task).get_handles().to_vec();
-    let modes: Vec<starpu_data_access_mode> = (*task).get_modes().to_vec();
+    let handles: Vec<starpu_data_handle_t> = task.get_handles().to_vec();
+    let modes: Vec<starpu_data_access_mode> = task.get_modes().to_vec();
     assert_eq!(modes.len(), handles.len());
     exchange_data_before_execution(&modes, &handles, xrank, me, prio as isize);
     if xrank == me {
-        let ret = starpu_task_submit(task);
+        let ret = unsafe { starpu_task_submit(ptask) };
         assert_eq!(ret, 0);
     }
     for i in 0..modes.len() {
@@ -283,8 +284,10 @@ unsafe fn task_insert_v(codelet: *mut starpu_codelet, args: VaList) -> c_int {
         }
     }
     if xrank != me {
-        (*task).set_destroy(0);
-        starpu_task_destroy(task);
+        task.set_destroy(0);
+        unsafe {
+            starpu_task_destroy(ptask);
+        }
     }
     0
 }
@@ -471,6 +474,8 @@ fn barrier() {
     debug!("[{}] Barrier done", rank);
 }
 
+/// # Safety
+/// Unsafe because var args
 #[no_mangle]
 pub unsafe extern "C" fn starpu_mpi_insert_task(
     _comm: MPI_Comm,
@@ -480,6 +485,8 @@ pub unsafe extern "C" fn starpu_mpi_insert_task(
     task_insert_v(codelet, args.as_va_list())
 }
 
+/// # Safety
+/// Unsafe because var args
 #[no_mangle]
 pub unsafe extern "C" fn starpu_mpi_task_insert(
     _comm: MPI_Comm,
