@@ -17,8 +17,8 @@ include!(concat!(env!("OUT_DIR"), "/starpu_mpi.rs"));
 mod core;
 mod redux;
 use crate::core::{HandleData, HandleManager, Rank, RecvReq, SendReq, Tag};
-use std::{ffi::VaList, mem::MaybeUninit, sync::Once};
 use std::os::raw::{c_char, c_int, c_uint, c_ulong, c_void};
+use std::{ffi::VaList, mem::MaybeUninit, sync::Once};
 extern crate log;
 use log::*;
 
@@ -34,6 +34,21 @@ struct Req {
     rank: Rank,
     tag: starpu_mpi_tag_t,
     prio: isize,
+    callback: Option<unsafe extern "C" fn(arg: *mut c_void)>,
+    cb_args: *mut c_void,
+}
+
+impl Req {
+    fn without_handle(rank: Rank) -> Self {
+        Req {
+            handle: std::ptr::null_mut(),
+            rank,
+            tag: -1,
+            prio: 0,
+            callback: None,
+            cb_args: std::ptr::null_mut(),
+        }
+    }
 }
 unsafe impl Send for Req {}
 unsafe impl Sync for Req {}
@@ -107,6 +122,12 @@ impl SendReq for Req {
                 starpu_data_release(self.handle);
             }
         }
+        if self.callback.is_some() {
+            let f = self.callback.unwrap();
+            unsafe {
+                f(self.cb_args);
+            }
+        }
     }
 
     fn data(&self) -> StarPUBuffer {
@@ -140,20 +161,25 @@ impl RecvReq for Req {
     }
 
     fn finish(&self, mut buf: Self::Buf) {
-        if self.handle.is_null() {
-            return;
+        if !self.handle.is_null() {
+            let b = buf.as_mut();
+            unsafe {
+                let r = starpu_data_unpack(
+                    self.handle,
+                    b.as_mut_ptr() as *mut c_void,
+                    b.len() as size_t,
+                );
+                assert_eq!(r, 0);
+                // Because starpu_data_unpack has freed the memory
+                buf.raw = std::ptr::null_mut();
+                starpu_data_release(self.handle);
+            }
         }
-        let b = buf.as_mut();
-        unsafe {
-            let r = starpu_data_unpack(
-                self.handle,
-                b.as_mut_ptr() as *mut c_void,
-                b.len() as size_t,
-            );
-            assert_eq!(r, 0);
-            // Because starpu_data_unpack has freed the memory
-            buf.raw = std::ptr::null_mut();
-            starpu_data_release(self.handle);
+        if self.callback.is_some() {
+            let f = self.callback.unwrap();
+            unsafe {
+                f(self.cb_args);
+            }
         }
     }
 }
@@ -201,11 +227,24 @@ unsafe extern "C" fn send_cb(arg: *mut c_void) {
 }
 
 fn send(handle: starpu_data_handle_t, rank: Rank, tag: starpu_mpi_tag_t, prio: isize) {
+    send_with_callback(handle, rank, tag, prio, None, std::ptr::null_mut());
+}
+
+fn send_with_callback(
+    handle: starpu_data_handle_t,
+    rank: Rank,
+    tag: starpu_mpi_tag_t,
+    prio: isize,
+    callback: Option<unsafe extern "C" fn(a: *mut c_void)>,
+    cb_args: *mut c_void,
+) {
     let req = Box::into_raw(Box::new(Req {
         handle,
         rank,
         tag,
         prio,
+        callback,
+        cb_args,
     }));
     unsafe {
         starpu_data_acquire_cb(
@@ -218,11 +257,23 @@ fn send(handle: starpu_data_handle_t, rank: Rank, tag: starpu_mpi_tag_t, prio: i
 }
 
 fn recv(handle: starpu_data_handle_t, rank: Rank, tag: starpu_mpi_tag_t) {
+    recv_with_callback(handle, rank, tag, None, std::ptr::null_mut());
+}
+
+fn recv_with_callback(
+    handle: starpu_data_handle_t,
+    rank: Rank,
+    tag: starpu_mpi_tag_t,
+    callback: Option<unsafe extern "C" fn(a: *mut c_void)>,
+    cb_args: *mut c_void,
+) {
     let req = Box::into_raw(Box::new(Req {
         handle,
         rank,
         tag,
         prio: 0,
+        callback,
+        cb_args,
     }));
     unsafe {
         starpu_data_acquire_cb(
@@ -448,22 +499,12 @@ fn barrier() {
     debug!("[{}] Starting barrier", rank);
     if rank == 0 {
         for i in 1..ws {
-            let r = Req {
-                handle: std::ptr::null_mut(),
-                rank: i,
-                tag: -1,
-                prio: 0,
-            };
+            let r = Req::without_handle(i);
             s.recv(i, r);
             s.send(i, r);
         }
     } else {
-        let r = Req {
-            handle: std::ptr::null_mut(),
-            rank: 0,
-            tag: -1,
-            prio: 0,
-        };
+        let r = Req::without_handle(0);
         s.send(0, r);
         s.recv(0, r);
     }
@@ -597,16 +638,15 @@ pub unsafe extern "C" fn starpu_mpi_shutdown() -> c_int {
 #[doc = "completion of the request."]
 #[no_mangle]
 pub unsafe extern "C" fn starpu_mpi_isend_detached(
-    _data_handle: starpu_data_handle_t,
-    _dest: c_int,
-    _data_tag: starpu_mpi_tag_t,
+    data_handle: starpu_data_handle_t,
+    dest: c_int,
+    data_tag: starpu_mpi_tag_t,
     _comm: MPI_Comm,
-    _callback: Option<unsafe extern "C" fn(arg1: *mut c_void)>,
-    _arg: *mut c_void,
+    callback: Option<unsafe extern "C" fn(arg1: *mut c_void)>,
+    arg: *mut c_void,
 ) -> c_int {
-    // TODO: It's almost just calling send but we are missing the callback
-    // management
-    todo!()
+    send_with_callback(data_handle, dest as Rank, data_tag, 0, callback, arg);
+    0
 }
 
 #[doc = "Post a nonblocking receive in \\p data_handle from the node \\p"]
@@ -619,14 +659,13 @@ pub unsafe extern "C" fn starpu_mpi_isend_detached(
 #[doc = "completion of the request."]
 #[no_mangle]
 pub unsafe extern "C" fn starpu_mpi_irecv_detached(
-    _data_handle: starpu_data_handle_t,
-    _source: c_int,
-    _data_tag: starpu_mpi_tag_t,
+    data_handle: starpu_data_handle_t,
+    source: c_int,
+    data_tag: starpu_mpi_tag_t,
     _comm: MPI_Comm,
-    _callback: Option<unsafe extern "C" fn(arg1: *mut c_void)>,
-    _arg: *mut c_void,
+    callback: Option<unsafe extern "C" fn(arg1: *mut c_void)>,
+    arg: *mut c_void,
 ) -> c_int {
-    // TODO: It's almost just calling recv but we are missing the callback
-    // management
-    todo!();
+    recv_with_callback(data_handle, source as Rank, data_tag, callback, arg);
+    0
 }

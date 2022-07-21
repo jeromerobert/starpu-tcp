@@ -12,7 +12,6 @@ unsafe extern "C" fn detached_callback(arg: *mut c_void) {
     let args = &*bargs;
     args.taskB.as_mut().unwrap().get_handles_mut()[1] = args.new_handle;
     assert_eq!(starpu_task_submit(args.taskB), 0);
-    starpu_data_release(args.new_handle);
     starpu_data_unregister_submit(args.new_handle);
 }
 
@@ -42,12 +41,10 @@ struct Arguments {
 unsafe extern "C" fn recv_callback(varg: *mut c_void) {
     let arg = &mut *(varg as *mut Arguments);
     starpu_data_register_same(&mut arg.new_handle, arg.data_handle);
-    recv(arg.new_handle, arg.node, arg.data_tag);
-    // TODO: detached_callback could be a callback of the recv request so there is
-    // no need for a second data_acquire
-    starpu_data_acquire_cb(
+    recv_with_callback(
         arg.new_handle,
-        starpu_data_access_mode_STARPU_W,
+        arg.node,
+        arg.data_tag,
         Some(detached_callback),
         varg,
     );
