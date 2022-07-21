@@ -1,4 +1,3 @@
-
 extern crate bindgen;
 
 use std::env;
@@ -9,18 +8,37 @@ fn main() {
     let starpu_src = env::var("STARPU_SRC_DIR").unwrap();
     let starpu_build = env::var("STARPU_BUILD_DIR").unwrap();
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+    println!("cargo:rerun-if-env-changed=STARPU_SRC_DIR");
+    println!("cargo:rerun-if-env-changed=STARPU_BUILD_DIR");
     let starpu_i_inc = format!("-I{}{}include", starpu_src, MAIN_SEPARATOR);
     let starpu_i_src = format!("-I{}{}src", starpu_src, MAIN_SEPARATOR);
     let starpu_i_binc = format!("-I{}{}include", starpu_build, MAIN_SEPARATOR);
     let starpu_i_bsrc = format!("-I{}{}src", starpu_build, MAIN_SEPARATOR);
-    println!("cargo:rustc-link-search={}{1}src{1}.libs", starpu_build, MAIN_SEPARATOR);
+    let coherency_header = format!(
+        "{}{1}src{1}datawizard{1}coherency.h",
+        starpu_src, MAIN_SEPARATOR
+    );
+    let coherency_rs = out_path.join("starpu_coherency.rs");
+    println!(
+        "cargo:rustc-link-search={}{1}src{1}.libs",
+        starpu_build, MAIN_SEPARATOR
+    );
+    let starpu_mpi_header = format!(
+        "{}{1}mpi{1}include{1}starpu_mpi.h",
+        starpu_src, MAIN_SEPARATOR
+    );
+    let starpu_mpi_rs = out_path.join("starpu_mpi.rs");
     println!("cargo:rustc-link-lib=starpu-1.3");
+    for h in [&coherency_header, &starpu_mpi_header] {
+        println!("cargo:rerun-if-changed={}", h);
+    }
+
     let bindings = bindgen::Builder::default()
         .clang_arg(&starpu_i_inc)
         .clang_arg(&starpu_i_src)
         .clang_arg(&starpu_i_binc)
         .clang_arg(&starpu_i_bsrc)
-        .header(format!("{}{1}src{1}datawizard{1}coherency.h", starpu_src, MAIN_SEPARATOR))
+        .header(coherency_header)
         .allowlist_function("starpu_task_submit")
         .allowlist_function("starpu_codelet_pack_arg_init")
         .allowlist_function("starpu_codelet_pack_arg_fini")
@@ -53,18 +71,18 @@ fn main() {
         .generate()
         .expect("Unable to generate bindings");
     bindings
-        .write_to_file(out_path.join("starpu_coherency.rs"))
+        .write_to_file(coherency_rs)
         .expect("Couldn't write bindings!");
 
     let bindings = bindgen::Builder::default()
         .clang_arg(&starpu_i_inc)
         .clang_arg(&starpu_i_binc)
-        .header(format!("{}{1}mpi{1}include{1}starpu_mpi.h", starpu_src, MAIN_SEPARATOR))
+        .header(starpu_mpi_header)
         .allowlist_type("starpu_mpi_tag_t")
         .allowlist_type("MPI_Comm")
         .generate()
         .expect("Unable to generate bindings");
     bindings
-        .write_to_file(out_path.join("starpu_mpi.rs"))
+        .write_to_file(starpu_mpi_rs)
         .expect("Couldn't write bindings!");
 }
