@@ -22,7 +22,7 @@ use std::sync::Mutex;
 #[cfg(feature = "debug")]
 use tracing_mutex::stdsync::TracingMutex as Mutex;
 
-use self::queue::TaskQueue;
+use self::queue::{Task, TaskQueue};
 pub type Rank = u16;
 pub type Tag = i64;
 
@@ -72,13 +72,7 @@ impl HandleData {
     }
 }
 
-// conception:
-// HandleManager <- one to rule them all
-// Registry <--- current HandleRegistry but opaque
-// ClusterConfig
-// Cluster <-- the ib0 TCPListener + remote socketaddr + all remote TCP stream
-// InitServer <-- rank0 server + remote socketaddr
-
+/// A request to be sent to a remote peer
 pub trait SendReq: Send + Sync + Debug {
     type Buf: AsRef<[u8]>;
     fn data(&self) -> Self::Buf;
@@ -89,6 +83,7 @@ pub trait SendReq: Send + Sync + Debug {
     fn priority(&self) -> isize;
 }
 
+/// A request to be received from a remote peer
 pub trait RecvReq: Send + Sync + Debug {
     type Buf: AsMut<[u8]>;
     fn tag(&self) -> Tag;
@@ -96,7 +91,9 @@ pub trait RecvReq: Send + Sync + Debug {
     fn finish(&self, buf: Self::Buf);
 }
 
-pub struct HandleManager<S: SendReq + Send + Sync, R: RecvReq>(ManagerImpl<S, R>);
+pub struct HandleManager<S: SendReq + Send + Sync + 'static, R: RecvReq + 'static>(
+    ManagerImpl<S, R>,
+);
 
 impl<S: 'static + SendReq + Send + Sync, R: 'static + RecvReq + Send> HandleManager<S, R> {
     pub fn new() -> Self {
@@ -136,7 +133,8 @@ impl<S: 'static + SendReq + Send + Sync, R: 'static + RecvReq + Send> HandleMana
     }
 }
 
-struct ManagerImpl<S: SendReq + Send + Sync, R: RecvReq> {
+/// Private data of HandleManager
+struct ManagerImpl<S: SendReq + Send + Sync + 'static, R: RecvReq + 'static> {
     cluster: Cluster<S, R>,
 }
 
@@ -365,7 +363,7 @@ impl Serializable for MsgHeader {
     }
 }
 
-struct Peer<S: SendReq, R: RecvReq> {
+struct Peer<S: SendReq + 'static, R: RecvReq + 'static> {
     rank: Rank,
     addr: SocketAddr,
     /// Stream for writting
@@ -381,8 +379,47 @@ struct Peer<S: SendReq, R: RecvReq> {
     pending_recv: Mutex<Vec<R>>,
     #[cfg(feature = "debug")]
     watchdog: Mutex<Option<vigil::Vigil>>,
-    write_tasks: queue::TaskQueue,
+    write_tasks: queue::TaskQueue<SendReqTask<S, R>>,
     log_data_size: usize,
+}
+
+struct SendReqTask<S: SendReq + 'static, R: RecvReq + 'static> {
+    delegate: S,
+    peer: &'static Peer<S, R>,
+}
+
+impl<S: SendReq, R: RecvReq> queue::Task for SendReqTask<S, R> {
+    fn run(&self) {
+        let req = &self.delegate;
+        trace!("Sending {} to {}", req.tag(), self.peer.rank);
+        {
+            let mut l = self.peer.stream.lock().unwrap();
+            let p = (*l).as_mut().unwrap();
+            let buf = req.data();
+            let s = buf.as_ref();
+            MsgHeader {
+                t: MsgType::Data,
+                tag: req.tag(),
+            }
+            .write(p)
+            .unwrap();
+            p.write_all(&s.len().to_ne_bytes()).unwrap();
+            if s.len() > self.peer.log_data_size {
+                let start = SystemTime::now();
+                p.write_all(s).unwrap();
+                let e = start.elapsed().unwrap();
+                let smib = s.len() as f32 / (1 << 20) as f32;
+                info!("Wrote {}MiB at {}MiB/s", smib, smib / e.as_secs_f32());
+            } else {
+                p.write_all(s).unwrap();
+            }
+        }
+        req.clear();
+    }
+
+    fn size(&self) -> usize {
+        self.delegate.size()
+    }
 }
 
 impl<S: SendReq, R: RecvReq> Debug for Peer<S, R> {
@@ -421,7 +458,12 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
         self.recv_reqs.is_empty() && self.send_reqs.is_empty() && ps.is_empty() && pr.is_empty()
     }
 
-    fn new(rank: Rank, write_tasks: TaskQueue, logging_threshold: usize, me: Rank) -> Self {
+    fn new(
+        rank: Rank,
+        write_tasks: TaskQueue<SendReqTask<S, R>>,
+        logging_threshold: usize,
+        me: Rank,
+    ) -> Self {
         let mib = (1 << 20) as f32;
         let el: f32 = parse_env_var("STARPU_TCP_LOG_DATA_SIZE", usize::MAX as f32 / mib);
         let mut recv_reqs = MultiMap::new();
@@ -578,39 +620,15 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
     fn push_send_req(&'static self, req: S) {
         let size = req.size();
         let prio = req.priority();
+        let queue_req = SendReqTask {
+            delegate: req,
+            peer: self,
+        };
         if size < 16 {
-            self.process_send_req(req);
+            queue_req.run();
         } else {
-            self.write_tasks
-                .push(move || self.process_send_req(req), size, prio);
+            self.write_tasks.push(queue_req, prio);
         }
-    }
-
-    fn process_send_req(&self, req: S) {
-        trace!("Sending {} to {}", req.tag(), self.rank);
-        {
-            let mut l = self.stream.lock().unwrap();
-            let p = (*l).as_mut().unwrap();
-            let buf = req.data();
-            let s = buf.as_ref();
-            MsgHeader {
-                t: MsgType::Data,
-                tag: req.tag(),
-            }
-            .write(p)
-            .unwrap();
-            p.write_all(&s.len().to_ne_bytes()).unwrap();
-            if s.len() > self.log_data_size {
-                let start = SystemTime::now();
-                p.write_all(s).unwrap();
-                let e = start.elapsed().unwrap();
-                let smib = s.len() as f32 / (1 << 20) as f32;
-                info!("Wrote {}MiB at {}MiB/s", smib, smib / e.as_secs_f32());
-            } else {
-                p.write_all(s).unwrap();
-            }
-        }
-        req.clear();
     }
 
     fn send(&'static self, req: S) {
@@ -635,16 +653,11 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
         self.watchdog_ping();
         let tag = req.tag();
         self.recv_reqs.insert(tag, req);
-        // TODO: do we need this for fast task insertion ?
-        /*self.write_tasks.push(
-            move || self.send_ready(tag),
-            std::mem::size_of::<MsgHeader>(),
-        );*/
         self.send_ready(tag);
     }
 }
 
-struct Cluster<S: SendReq, R: RecvReq> {
+struct Cluster<S: SendReq + 'static, R: RecvReq + 'static> {
     config: topology::Config,
     peers: Vec<Peer<S, R>>,
     listener: Option<TcpListener>,

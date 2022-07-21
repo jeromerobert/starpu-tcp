@@ -10,19 +10,19 @@ use log::debug;
 use super::multimap::PrioQueue;
 pub type Priority = isize;
 
-struct Task {
-    /// The function to execute
-    closure: Box<dyn FnOnce() + Send + 'static>,
+pub trait Task {
+    /// Execute the task
+    fn run(&self);
     /// The size of the data associated to this task.
     /// This is only used for logging and statistics
-    size: usize,
+    fn size(&self) -> usize;
 }
 
-pub struct TaskQueue {
+pub struct TaskQueue<T> {
     /// If tasks are not submitted from this thread execute them right now
     thread_id: Option<ThreadId>,
     /// The queue of tasks waiting for execution
-    tasks: Arc<(Mutex<PrioQueue<Priority, Task>>, Condvar)>,
+    tasks: Arc<(Mutex<PrioQueue<Priority, T>>, Condvar)>,
     /// Maximum number of tasks waiting (for logging)
     max_tasks: Arc<AtomicUsize>,
     /// Maximum size of data waiting in the queue (for logging)
@@ -35,7 +35,7 @@ pub struct TaskQueue {
     sync_small: usize,
 }
 
-impl Clone for TaskQueue {
+impl<T> Clone for TaskQueue<T> {
     fn clone(&self) -> Self {
         Self {
             tasks: Arc::clone(&self.tasks),
@@ -49,7 +49,7 @@ impl Clone for TaskQueue {
     }
 }
 
-impl TaskQueue {
+impl<T: Task + Send + Sync + 'static> TaskQueue<T> {
     fn run_tasks(&self, threshold: usize, label: String) {
         loop {
             let mut l = self.tasks.0.lock().unwrap();
@@ -60,8 +60,8 @@ impl TaskQueue {
                         debug!("{}{}", label, l.len());
                     }
                     drop(l);
-                    self.cur_size.fetch_sub(task.size, Ordering::Relaxed);
-                    (task.closure)();
+                    self.cur_size.fetch_sub(task.size(), Ordering::Relaxed);
+                    task.run();
                 }
                 None => {
                     // we don't use the lock
@@ -105,12 +105,12 @@ impl TaskQueue {
         r
     }
 
-    pub fn push<F: FnOnce() + Send + 'static>(&self, f: F, size: usize, priority: isize) {
-        if size < self.sync_small {
-            f();
+    pub fn push(&self, task: T, priority: isize) {
+        if task.size() < self.sync_small {
+            task.run();
         } else {
             // We need to lock self.tasks
-            self.push_with_lock(f, size, priority);
+            self.push_with_lock(task, priority);
         }
     }
 
@@ -131,23 +131,17 @@ impl TaskQueue {
         }
     }
 
-    fn push_with_lock<F: FnOnce() + Send + 'static>(&self, f: F, size: usize, priority: isize) {
+    fn push_with_lock(&self, task: T, priority: isize) {
         let mut l = self.tasks.0.lock().unwrap();
         let size_before = l.len();
         if self.is_sync(l.highest(), priority) {
-            f();
+            task.run();
         } else {
             let o = Ordering::Relaxed;
-            self.cur_size.fetch_add(size, o);
+            self.cur_size.fetch_add(task.size(), o);
             self.max_size.fetch_max(self.cur_size.load(o), o);
             self.max_tasks.fetch_max(l.len(), o);
-            l.push(
-                priority,
-                Task {
-                    closure: Box::new(f),
-                    size,
-                },
-            );
+            l.push(priority, task);
         }
         drop(l);
         if size_before == 0 {
