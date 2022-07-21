@@ -276,12 +276,8 @@ impl InitServer {
             return;
         }
         let mut toread = topo.len();
-        //FIXME: try how to make it works (Option<TcpStream> have not Clone)
-        //let mut tmp_streams = vec![None; toread];
-        let mut tmp_streams = Vec::with_capacity(toread);
-        for _ in 0..toread {
-            tmp_streams.push(None);
-        }
+        let mut tmp_streams = Vec::new();
+        tmp_streams.resize_with(toread, || None);
 
         // add a timeout to detect if some nodes are missing
         for streamr in self.listener.as_ref().unwrap().incoming() {
