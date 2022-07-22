@@ -328,8 +328,17 @@ fn task_insert_v(codelet: *mut starpu_codelet, args: VaList) -> c_int {
         assert_eq!(ret, 0);
     }
     for i in 0..modes.len() {
+        // We deliberately choose not to systematically return the handle to its original node.
+        // If someone wants that, he has to call starpu_mpi_get_data_on_node. This is
+        // different from starpu-mpi do.
+        // When a handle has been written on a node, invalidate data on the other nodes.
         if modes[i] & starpu_data_access_mode_STARPU_W != 0 {
             data_from_handle(handles[i]).set_on_only(xrank);
+            if me != xrank {
+                unsafe {
+                    starpu_data_invalidate_submit(handles[i]);
+                }
+            }
         }
     }
     if xrank != me {
@@ -342,6 +351,7 @@ fn task_insert_v(codelet: *mut starpu_codelet, args: VaList) -> c_int {
 }
 
 unsafe extern "C" fn unregister_hook(handle: starpu_data_handle_t) {
+    // free the HandleData struct
     Box::from_raw((*handle).mpi_data);
 }
 
@@ -393,6 +403,7 @@ impl starpu_task {
     }
 }
 
+/// Return true if val is a valid StarPU mode (ex: STARPU_RW)
 fn is_mode(val: u32) -> bool {
     (val & starpu_data_access_mode_STARPU_W != 0)
         || (val & starpu_data_access_mode_STARPU_R != 0)
@@ -480,7 +491,7 @@ fn wait_for_comms(time_resol_ms: u64) {
 fn wait_for_all() {
     // TODO: add a timer to detect deadlock
     loop {
-        // Tasks may post comms so we must way for both alternatively
+        // Tasks may post comms so we must wait for both alternatively
         unsafe {
             let r = starpu_task_wait_for_all();
             assert_eq!(r, 0);
@@ -591,7 +602,7 @@ pub unsafe extern "C" fn starpu_mpi_redux_data(_comm: MPI_Comm, data_handle: sta
 #[doc = "STARPU_MPI_CACHE)."]
 #[no_mangle]
 pub unsafe extern "C" fn starpu_mpi_cache_flush_all_data(_comm: MPI_Comm) {
-    // TODO implement
+    // Nothing to do here
 }
 
 #[doc = "Transfer data \\p data_handle to MPI node \\p node, sending it from"]

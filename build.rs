@@ -59,6 +59,7 @@ fn main() {
         .allowlist_function("starpu_task_declare_deps_array")
         .allowlist_function("starpu_data_register_same")
         .allowlist_function("starpu_data_unregister_submit")
+        .allowlist_function("starpu_data_invalidate_submit")
         .opaque_type("_starpu_data_request")
         .opaque_type("_starpu_jobid_list")
         .opaque_type("starpu_data_interface_ops")
