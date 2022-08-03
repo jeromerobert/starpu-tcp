@@ -1,6 +1,6 @@
 // This files contains the public API of starpu-tcp that is the one which mimic starpu-mpi
 // With redux.rs they are the 2 ones which keep all unsafe function and everything specific to starpu
-// Everything to specific to starpu should go to core and be safe.
+// Everything not specific to starpu should go to core and be safe.
 
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
@@ -568,6 +568,10 @@ pub unsafe extern "C" fn starpu_mpi_data_register_comm(
     _comm: MPI_Comm,
 ) {
     let ws = singleton().world_size();
+    assert!(
+        (rank as Rank) < ws,
+        "starpu_mpi_data_register_comm: invalid rank"
+    );
     let b = Box::new(HandleData::new(data_tag as Tag, rank as Rank, ws.into()));
     (*data_handle).mpi_data = Box::into_raw(b) as *mut c_void;
     _starpu_data_set_unregister_hook(data_handle, Some(unregister_hook));
