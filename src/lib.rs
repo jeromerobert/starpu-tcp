@@ -684,3 +684,12 @@ pub unsafe extern "C" fn starpu_mpi_irecv_detached(
     recv_with_callback(data_handle, source as Rank, data_tag, callback, arg);
     0
 }
+
+#[doc = "Block the caller until all group members of the communicator \\p"]
+#[doc = "comm have called it."]
+#[no_mangle]
+pub unsafe extern "C" fn starpu_mpi_barrier(_comm: MPI_Comm) -> c_int {
+    wait_for_all();
+    barrier();
+    0
+}
