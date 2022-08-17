@@ -125,7 +125,7 @@ impl<T: Task + Send + Sync + 'static> TaskQueue<T> {
         }
         match top_prio {
             // True if this task is urgent
-            Some(p) => priority >= p,
+            Some(p) => priority > p,
             // The queue is empty so all tasks are concidered urgent
             None => true,
         }
