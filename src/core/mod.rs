@@ -370,7 +370,7 @@ struct Peer<S: SendReq + 'static, R: RecvReq + 'static> {
     stream: Mutex<Option<TcpStream>>,
     connected: Mutex<bool>,
     /// Pending receive requests (connection established)
-    recv_reqs: MultiMap<Tag, R>,
+    recv_reqs: DoubleTypeMultiMap<Tag, R, Vec<u8>>,
     /// Pending send requests (connection established)
     send_reqs: UnkValMap<Tag, S>,
     /// Send requests waiting for connection
@@ -381,6 +381,8 @@ struct Peer<S: SendReq + 'static, R: RecvReq + 'static> {
     watchdog: Mutex<Option<vigil::Vigil>>,
     write_tasks: queue::TaskQueue<SendReqTask<S, R>>,
     log_data_size: usize,
+    /// Enable early requests
+    early_requests: bool,
 }
 
 struct SendReqTask<S: SendReq + 'static, R: RecvReq + 'static> {
@@ -463,11 +465,11 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
         write_tasks: TaskQueue<SendReqTask<S, R>>,
         logging_threshold: usize,
         me: Rank,
+        early_requests: bool,
     ) -> Self {
         let mib = (1 << 20) as f32;
         let el: f32 = parse_env_var("STARPU_TCP_LOG_DATA_SIZE", usize::MAX as f32 / mib);
-        let mut recv_reqs = MultiMap::new();
-        recv_reqs.log(format!("[{}<={}] Recv req", me, rank), logging_threshold);
+        let recv_reqs = DoubleTypeMultiMap::new();
         let mut send_reqs = UnkValMap::new();
         send_reqs.log(format!("[{}=>{}] Send req", me, rank), logging_threshold);
         Peer {
@@ -483,6 +485,7 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
             watchdog: Mutex::new(None),
             write_tasks,
             log_data_size: (el * mib) as usize,
+            early_requests,
         }
     }
 
@@ -585,7 +588,11 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
                     t: MsgType::Data,
                     tag,
                 } => {
-                    self.process_data_msg(&mut s, tag);
+                    if self.early_requests {
+                        self.process_data_early(&mut s, tag)
+                    } else {
+                        self.process_data_msg(&mut s, tag);
+                    }
                 }
                 MsgHeader {
                     t: MsgType::Ready,
@@ -598,9 +605,19 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
             }
         }
     }
+
+    /// unpack helper for early requests
+    fn unpack(r: R, buf: Vec<u8>) {
+        let mut buf2 = r.create_buf(buf.len());
+        buf2.as_mut().copy_from_slice(&buf);
+        r.finish(buf2);
+    }
+
     fn process_data_msg(&self, p: &mut TcpStream, tag: Tag) {
         trace!("Receiving {} from {}", tag, self.rank);
-        let r = self.recv_reqs.pop(tag).unwrap();
+        // TODO: when the receive request does not exists yet, move it to
+        // a early request map
+        let (r, _) = self.recv_reqs.pop1_or_insert2(tag, Vec::new()).unwrap();
         let mut buf: [u8; 8] = [0; 8];
         p.read_exact(&mut buf).unwrap();
         let size = usize::from_ne_bytes(buf);
@@ -615,6 +632,20 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
             p.read_exact(buf.as_mut()).unwrap();
         }
         r.finish(buf);
+    }
+
+    /// Same as process_data_msg but for early request mode.
+    /// Here we always have an additionnal intermediate Vec<u8> buffer
+    fn process_data_early(&self, p: &mut TcpStream, tag: Tag) {
+        let mut buf: [u8; 8] = [0; 8];
+        p.read_exact(&mut buf).unwrap();
+        let size = usize::from_ne_bytes(buf);
+        // This is not efficent as we will overwritte those 0 soon but there is no other way in safe rust
+        let mut buf = vec![0; size];
+        p.read_exact(buf.as_mut()).unwrap();
+        if let Some((r, buf)) = self.recv_reqs.pop1_or_insert2(tag, buf) {
+            Self::unpack(r, buf);
+        }
     }
 
     fn push_send_req(&'static self, req: S) {
@@ -633,7 +664,11 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
 
     fn send(&'static self, req: S) {
         self.watchdog_ping();
-        if let Some(req) = self.send_reqs.pop_nv_or_insert(req.tag(), req) {
+        if self.early_requests {
+            // We are in early request mode so we don't wait for ready notification
+            // from the receiver
+            self.push_send_req(req)
+        } else if let Some(req) = self.send_reqs.pop_nv_or_insert(req.tag(), req) {
             // The receiver is already waiting so process right now
             self.push_send_req(req)
         } // else put it in pending request list
@@ -652,8 +687,13 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
     fn recv(&'static self, req: R) {
         self.watchdog_ping();
         let tag = req.tag();
-        self.recv_reqs.insert(tag, req);
-        self.send_ready(tag);
+        if let Some((req, buf)) = self.recv_reqs.insert1_or_pop2(tag, req) {
+            // Data was received before the request was posted (early request)
+            Self::unpack(req, buf);
+        } else if !self.early_requests {
+            // Notify the sender that we are ready to receive
+            self.send_ready(tag);
+        }
     }
 }
 
@@ -687,9 +727,16 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Cluster<S, R> {
         let ws: usize = cn.world_size() as usize;
         let mut peers = Vec::with_capacity(ws);
         let lms: usize = parse_env_var("STARPU_TCP_LOG_MAP_SIZE", usize::MAX);
+        let early_requests = std::env::var("STARPU_TCP_EARLY_REQ").is_ok();
         let q = TaskQueue::with_logging(lms, format!("[{}] reqs to write: ", cn.rank()));
         for rank in 0..ws {
-            peers.push(Peer::new(rank as Rank, q.clone(), lms, cn.rank()));
+            peers.push(Peer::new(
+                rank as Rank,
+                q.clone(),
+                lms,
+                cn.rank(),
+                early_requests,
+            ));
         }
         assert!(ws >= 1);
         Cluster {

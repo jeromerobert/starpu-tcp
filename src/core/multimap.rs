@@ -271,3 +271,67 @@ impl<K: Hash + Eq + Debug, V: Debug> UnsafeMultiMap<K, V> {
         self.size
     }
 }
+
+#[derive(Debug)]
+struct UnsafeDoubleTypeMultiMap<K: Hash + Eq + Debug, V1: Debug, V2: Debug> {
+    v1map: UnsafeMultiMap<K, V1>,
+    v2map: UnsafeMultiMap<K, V2>,
+}
+
+impl<K: Hash + Eq + Debug, V1: Debug, V2: Debug> UnsafeDoubleTypeMultiMap<K, V1, V2> {
+    // We return V2 to give back ownership
+    fn pop1_or_insert2(&mut self, key: K, v2: V2) -> Option<(V1, V2)> {
+        if let Some(v1) = self.v1map.pop(&key) {
+            Some((v1, v2))
+        } else {
+            self.v2map.insert(key, v2);
+            None
+        }
+    }
+    fn insert1_or_pop2(&mut self, key: K, v1: V1) -> Option<(V1, V2)> {
+        if let Some(v2) = self.v2map.pop(&key) {
+            Some((v1, v2))
+        } else {
+            self.v1map.insert(key, v1);
+            None
+        }
+    }
+
+    fn new() -> Self {
+        Self {
+            v1map: UnsafeMultiMap::new(),
+            v2map: UnsafeMultiMap::new(),
+        }
+    }
+}
+
+pub struct DoubleTypeMultiMap<K: Hash + Eq + Debug, V1: Debug, V2: Debug> {
+    data: Mutex<UnsafeDoubleTypeMultiMap<K, V1, V2>>,
+}
+
+impl<K: Hash + Eq + Debug, V1: Debug, V2: Debug> DoubleTypeMultiMap<K, V1, V2> {
+    pub fn pop1_or_insert2(&self, key: K, v: V2) -> Option<(V1, V2)> {
+        self.data.lock().unwrap().pop1_or_insert2(key, v)
+    }
+
+    pub fn insert1_or_pop2(&self, key: K, v: V1) -> Option<(V1, V2)> {
+        self.data.lock().unwrap().insert1_or_pop2(key, v)
+    }
+
+    pub fn new() -> Self {
+        Self {
+            data: Mutex::new(UnsafeDoubleTypeMultiMap::new()),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        let l = self.data.lock().unwrap();
+        l.v1map.len() == 0 && l.v2map.len() == 0
+    }
+}
+
+impl<K: Hash + Eq + Debug, V1: Debug, V2: Debug> Debug for DoubleTypeMultiMap<K, V1, V2> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        write!(f, "{:?}", *self.data.lock().unwrap())
+    }
+}
