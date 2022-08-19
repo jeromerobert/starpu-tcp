@@ -33,8 +33,8 @@ pub struct TaskQueue<T> {
     sync_prio_size: usize,
     /// Task smaller than this will be processed in the push thread
     sync_small: usize,
-    /// Force push to be always asynchrone
-    always_async: bool,
+    /// Allow to process some request synchronously
+    may_sync: bool,
 }
 
 impl<T> Clone for TaskQueue<T> {
@@ -47,7 +47,7 @@ impl<T> Clone for TaskQueue<T> {
             cur_size: Arc::clone(&self.cur_size),
             sync_prio_size: self.sync_prio_size,
             sync_small: self.sync_small,
-            always_async: self.always_async,
+            may_sync: self.may_sync,
         }
     }
 }
@@ -88,7 +88,7 @@ impl<T: Task + Send + Sync + 'static> TaskQueue<T> {
             Err(_) => 0,
             Ok(s) => s.parse().unwrap(),
         };
-        let always_async = env::var("STARPU_TCP_SYNC_NEVER").is_ok();
+        let may_sync = env::var("STARPU_TCP_MAY_SYNC").is_ok();
         let r = Self {
             thread_id,
             tasks: Arc::new((Mutex::new(PrioQueue::new()), Condvar::new())),
@@ -97,7 +97,7 @@ impl<T: Task + Send + Sync + 'static> TaskQueue<T> {
             cur_size: Arc::new(AtomicUsize::new(0)),
             sync_prio_size,
             sync_small,
-            always_async,
+            may_sync,
         };
         let rr = r.clone();
         // TODO: Only one thread for all peer may not be enough
@@ -139,7 +139,7 @@ impl<T: Task + Send + Sync + 'static> TaskQueue<T> {
     fn push_with_lock(&self, task: T, priority: isize) {
         let mut l = self.tasks.0.lock().unwrap();
         let size_before = l.len();
-        if !self.always_async && self.is_sync(l.highest(), priority) {
+        if self.may_sync && self.is_sync(l.highest(), priority) {
             task.run();
         } else {
             let o = Ordering::Relaxed;
