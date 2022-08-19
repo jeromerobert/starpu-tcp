@@ -92,14 +92,6 @@ impl<K: Hash + Eq + Debug, V: Debug> UnsafeNoValMap<K, V> {
     }
 }
 
-/// Thread safe map with multiple values for each keys.
-/// Values are insert and popped using a FIFO/queue scheme.
-pub struct MultiMap<K: Hash + Eq + Debug, V: Debug> {
-    data: Mutex<UnsafeMultiMap<K, V>>,
-    log_label: String,
-    log_threshold: usize,
-}
-
 /// A multi-map which allow to have keys with a given number of unknown values
 pub struct UnkValMap<K: Hash + Eq + Debug, V: Debug> {
     data: Mutex<UnsafeNoValMap<K, V>>,
@@ -107,47 +99,9 @@ pub struct UnkValMap<K: Hash + Eq + Debug, V: Debug> {
     log_threshold: usize,
 }
 
-impl<K: Hash + Eq + Debug, V: Debug> Debug for MultiMap<K, V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
-        write!(f, "{:?}", *self.data.lock().unwrap())
-    }
-}
-
 impl<K: Hash + Eq + Debug, V: Debug> Debug for UnkValMap<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
         write!(f, "{:?}", *self.data.lock().unwrap())
-    }
-}
-impl<K: Hash + Eq + Debug, V: Debug> MultiMap<K, V> {
-    pub fn new() -> Self {
-        Self {
-            data: Mutex::new(UnsafeMultiMap::new()),
-            log_label: "".to_string(),
-            log_threshold: usize::MAX,
-        }
-    }
-
-    pub fn log(&mut self, label: String, threshold: usize) {
-        self.log_label = label;
-        self.log_threshold = threshold;
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.data.lock().unwrap().data.is_empty()
-    }
-    pub fn pop(&self, key: K) -> Option<V> {
-        let mut l = self.data.lock().unwrap();
-        if l.len() > 0 && l.len() % self.log_threshold == 0 {
-            debug!("{} size: {}", self.log_label, l.len());
-        }
-        l.pop(&key)
-    }
-    pub fn insert(&self, key: K, value: V) {
-        let mut l = self.data.lock().unwrap();
-        if l.len() > 0 && l.len() % self.log_threshold == 0 {
-            debug!("{} size: {}", self.log_label, l.len());
-        }
-        l.insert(key, value);
     }
 }
 
