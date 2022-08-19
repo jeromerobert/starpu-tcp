@@ -81,14 +81,17 @@ pub trait SendReq: Send + Sync + Debug {
     /// Approximate size of this handle (only used for statistics)
     fn size(&self) -> usize;
     fn priority(&self) -> isize;
+    /// Send the request without waiting for the ready message
+    fn early(&self) -> bool;
 }
 
 /// A request to be received from a remote peer
 pub trait RecvReq: Send + Sync + Debug {
-    type Buf: AsMut<[u8]>;
+    type Buf: AsMut<[u8]> + Debug + Send + Sync;
     fn tag(&self) -> Tag;
-    fn create_buf(&self, size: usize) -> Self::Buf;
+    fn create_buf(size: usize) -> Self::Buf;
     fn finish(&self, buf: Self::Buf);
+    fn early(&self) -> bool;
 }
 
 pub struct HandleManager<S: SendReq + Send + Sync + 'static, R: RecvReq + 'static>(
@@ -370,7 +373,7 @@ struct Peer<S: SendReq + 'static, R: RecvReq + 'static> {
     stream: Mutex<Option<TcpStream>>,
     connected: Mutex<bool>,
     /// Pending receive requests (connection established)
-    recv_reqs: DoubleTypeMultiMap<Tag, R, Vec<u8>>,
+    recv_reqs: DoubleTypeMultiMap<Tag, R, R::Buf>,
     /// Pending send requests (connection established)
     send_reqs: UnkValMap<Tag, S>,
     /// Send requests waiting for connection
@@ -381,8 +384,6 @@ struct Peer<S: SendReq + 'static, R: RecvReq + 'static> {
     watchdog: Mutex<Option<vigil::Vigil>>,
     write_tasks: queue::TaskQueue<SendReqTask<S, R>>,
     log_data_size: usize,
-    /// Enable early requests
-    early_requests: bool,
 }
 
 struct SendReqTask<S: SendReq + 'static, R: RecvReq + 'static> {
@@ -465,7 +466,6 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
         write_tasks: TaskQueue<SendReqTask<S, R>>,
         logging_threshold: usize,
         me: Rank,
-        early_requests: bool,
     ) -> Self {
         let mib = (1 << 20) as f32;
         let el: f32 = parse_env_var("STARPU_TCP_LOG_DATA_SIZE", usize::MAX as f32 / mib);
@@ -485,7 +485,6 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
             watchdog: Mutex::new(None),
             write_tasks,
             log_data_size: (el * mib) as usize,
-            early_requests,
         }
     }
 
@@ -588,11 +587,7 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
                     t: MsgType::Data,
                     tag,
                 } => {
-                    if self.early_requests {
-                        self.process_data_early(&mut s, tag)
-                    } else {
-                        self.process_data_msg(&mut s, tag);
-                    }
+                    self.process_data_msg(&mut s, tag);
                 }
                 MsgHeader {
                     t: MsgType::Ready,
@@ -606,22 +601,12 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
         }
     }
 
-    /// unpack helper for early requests
-    fn unpack(r: R, buf: Vec<u8>) {
-        let mut buf2 = r.create_buf(buf.len());
-        buf2.as_mut().copy_from_slice(&buf);
-        r.finish(buf2);
-    }
-
     fn process_data_msg(&self, p: &mut TcpStream, tag: Tag) {
         trace!("Receiving {} from {}", tag, self.rank);
-        // TODO: when the receive request does not exists yet, move it to
-        // a early request map
-        let (r, _) = self.recv_reqs.pop1_or_insert2(tag, Vec::new()).unwrap();
         let mut buf: [u8; 8] = [0; 8];
         p.read_exact(&mut buf).unwrap();
         let size = usize::from_ne_bytes(buf);
-        let mut buf = r.create_buf(size);
+        let mut buf = R::create_buf(size);
         if size > self.log_data_size {
             let start = SystemTime::now();
             p.read_exact(buf.as_mut()).unwrap();
@@ -631,21 +616,9 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
         } else {
             p.read_exact(buf.as_mut()).unwrap();
         }
-        r.finish(buf);
-    }
-
-    /// Same as process_data_msg but for early request mode.
-    /// Here we always have an additionnal intermediate Vec<u8> buffer
-    fn process_data_early(&self, p: &mut TcpStream, tag: Tag) {
-        let mut buf: [u8; 8] = [0; 8];
-        p.read_exact(&mut buf).unwrap();
-        let size = usize::from_ne_bytes(buf);
-        // This is not efficent as we will overwritte those 0 soon but there is no other way in safe rust
-        let mut buf = vec![0; size];
-        p.read_exact(buf.as_mut()).unwrap();
         if let Some((r, buf)) = self.recv_reqs.pop1_or_insert2(tag, buf) {
-            Self::unpack(r, buf);
-        }
+            r.finish(buf);
+        } // else this is an early request that will be finished later
     }
 
     fn push_send_req(&'static self, req: S) {
@@ -664,7 +637,7 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
 
     fn send(&'static self, req: S) {
         self.watchdog_ping();
-        if self.early_requests {
+        if req.early() {
             // We are in early request mode so we don't wait for ready notification
             // from the receiver
             self.push_send_req(req)
@@ -687,10 +660,12 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
     fn recv(&'static self, req: R) {
         self.watchdog_ping();
         let tag = req.tag();
+        let early = req.early();
         if let Some((req, buf)) = self.recv_reqs.insert1_or_pop2(tag, req) {
             // Data was received before the request was posted (early request)
-            Self::unpack(req, buf);
-        } else if !self.early_requests {
+            req.finish(buf);
+        }
+        if !early {
             // Notify the sender that we are ready to receive
             self.send_ready(tag);
         }
@@ -727,16 +702,9 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Cluster<S, R> {
         let ws: usize = cn.world_size() as usize;
         let mut peers = Vec::with_capacity(ws);
         let lms: usize = parse_env_var("STARPU_TCP_LOG_MAP_SIZE", usize::MAX);
-        let early_requests = std::env::var("STARPU_TCP_EARLY_REQ").is_ok();
         let q = TaskQueue::with_logging(lms, format!("[{}] reqs to write: ", cn.rank()));
         for rank in 0..ws {
-            peers.push(Peer::new(
-                rank as Rank,
-                q.clone(),
-                lms,
-                cn.rank(),
-                early_requests,
-            ));
+            peers.push(Peer::new(rank as Rank, q.clone(), lms, cn.rank()));
         }
         assert!(ws >= 1);
         Cluster {

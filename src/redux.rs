@@ -47,6 +47,7 @@ unsafe extern "C" fn recv_callback(varg: *mut c_void) {
         arg.data_tag,
         Some(detached_callback),
         varg,
+        true,
     );
 }
 
@@ -95,7 +96,7 @@ pub unsafe fn perform(data_handle: starpu_data_handle_t) {
         starpu_task_declare_deps_array(taskC, taskBs.len() as c_uint, taskBs.as_mut_ptr());
         assert_eq!(starpu_task_submit(taskC), 0);
     } else {
-        send(data_handle, rank, tag, 0);
+        send_with_callback(data_handle, rank, tag, 0, None, std::ptr::null_mut(), true);
         starpu_task_insert(
             (*data_handle).init_cl,
             starpu_data_access_mode_STARPU_W,

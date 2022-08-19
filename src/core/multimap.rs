@@ -325,8 +325,7 @@ impl<K: Hash + Eq + Debug, V1: Debug, V2: Debug> DoubleTypeMultiMap<K, V1, V2> {
     }
 
     pub fn is_empty(&self) -> bool {
-        let l = self.data.lock().unwrap();
-        l.v1map.len() == 0 && l.v2map.len() == 0
+        self.data.lock().unwrap().v1map.len() == 0
     }
 }
 

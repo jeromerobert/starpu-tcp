@@ -22,10 +22,13 @@ use std::{ffi::VaList, mem::MaybeUninit, sync::Once};
 extern crate log;
 use log::*;
 
+#[derive(Debug)]
 struct StarPUBuffer {
     size: usize,
     raw: *mut c_void,
 }
+unsafe impl Send for StarPUBuffer {}
+unsafe impl Sync for StarPUBuffer {}
 
 #[derive(Debug, Copy, Clone)]
 struct Req {
@@ -36,6 +39,7 @@ struct Req {
     prio: isize,
     callback: Option<unsafe extern "C" fn(arg: *mut c_void)>,
     cb_args: *mut c_void,
+    early: bool,
 }
 
 impl Req {
@@ -47,6 +51,7 @@ impl Req {
             prio: 0,
             callback: None,
             cb_args: std::ptr::null_mut(),
+            early: false,
         }
     }
 }
@@ -89,7 +94,9 @@ impl StarPUBuffer {
             size: size as usize,
             raw: std::ptr::null_mut(),
         };
-        starpu_malloc(&mut r.raw, size as size_t);
+        if size > 0 {
+            starpu_malloc(&mut r.raw, size as size_t);
+        }
         r
     }
 }
@@ -141,6 +148,10 @@ impl SendReq for Req {
     fn priority(&self) -> isize {
         self.prio
     }
+
+    fn early(&self) -> bool {
+        self.early
+    }
 }
 
 impl AsMut<[u8]> for StarPUBuffer {
@@ -156,7 +167,7 @@ impl RecvReq for Req {
         self.tag
     }
 
-    fn create_buf(&self, size: usize) -> Self::Buf {
+    fn create_buf(size: usize) -> Self::Buf {
         unsafe { StarPUBuffer::with_size(size) }
     }
 
@@ -181,6 +192,10 @@ impl RecvReq for Req {
                 f(self.cb_args);
             }
         }
+    }
+
+    fn early(&self) -> bool {
+        self.early
     }
 }
 
@@ -227,7 +242,7 @@ unsafe extern "C" fn send_cb(arg: *mut c_void) {
 }
 
 fn send(handle: starpu_data_handle_t, rank: Rank, tag: starpu_mpi_tag_t, prio: isize) {
-    send_with_callback(handle, rank, tag, prio, None, std::ptr::null_mut());
+    send_with_callback(handle, rank, tag, prio, None, std::ptr::null_mut(), false);
 }
 
 fn send_with_callback(
@@ -237,6 +252,7 @@ fn send_with_callback(
     prio: isize,
     callback: Option<unsafe extern "C" fn(a: *mut c_void)>,
     cb_args: *mut c_void,
+    early: bool,
 ) {
     let req = Box::into_raw(Box::new(Req {
         handle,
@@ -245,6 +261,7 @@ fn send_with_callback(
         prio,
         callback,
         cb_args,
+        early,
     }));
     unsafe {
         starpu_data_acquire_cb(
@@ -257,7 +274,7 @@ fn send_with_callback(
 }
 
 fn recv(handle: starpu_data_handle_t, rank: Rank, tag: starpu_mpi_tag_t) {
-    recv_with_callback(handle, rank, tag, None, std::ptr::null_mut());
+    recv_with_callback(handle, rank, tag, None, std::ptr::null_mut(), false);
 }
 
 fn recv_with_callback(
@@ -266,6 +283,7 @@ fn recv_with_callback(
     tag: starpu_mpi_tag_t,
     callback: Option<unsafe extern "C" fn(a: *mut c_void)>,
     cb_args: *mut c_void,
+    early: bool,
 ) {
     let req = Box::into_raw(Box::new(Req {
         handle,
@@ -274,6 +292,7 @@ fn recv_with_callback(
         prio: 0,
         callback,
         cb_args,
+        early,
     }));
     unsafe {
         starpu_data_acquire_cb(
@@ -660,7 +679,7 @@ pub unsafe extern "C" fn starpu_mpi_isend_detached(
     callback: Option<unsafe extern "C" fn(arg1: *mut c_void)>,
     arg: *mut c_void,
 ) -> c_int {
-    send_with_callback(data_handle, dest as Rank, data_tag, 0, callback, arg);
+    send_with_callback(data_handle, dest as Rank, data_tag, 0, callback, arg, true);
     0
 }
 
@@ -681,7 +700,7 @@ pub unsafe extern "C" fn starpu_mpi_irecv_detached(
     callback: Option<unsafe extern "C" fn(arg1: *mut c_void)>,
     arg: *mut c_void,
 ) -> c_int {
-    recv_with_callback(data_handle, source as Rank, data_tag, callback, arg);
+    recv_with_callback(data_handle, source as Rank, data_tag, callback, arg, true);
     0
 }
 
