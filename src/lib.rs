@@ -304,7 +304,7 @@ fn recv_with_callback(
     }
 }
 
-pub fn exchange_data_before_execution(
+fn exchange_data_before_execution(
     modes: &[starpu_data_access_mode],
     handles: &[starpu_data_handle_t],
     xrank: Rank,
@@ -352,12 +352,13 @@ fn task_insert_v(codelet: *mut starpu_codelet, args: VaList) -> c_int {
         // different from starpu-mpi do.
         // When a handle has been written on a node, invalidate data on the other nodes.
         if modes[i] & starpu_data_access_mode_STARPU_W != 0 {
-            data_from_handle(handles[i]).set_on_only(xrank);
-            if me != xrank {
+            let dh = data_from_handle(handles[i]);
+            if me != xrank && dh.is_on(me) {
                 unsafe {
                     starpu_data_invalidate_submit(handles[i]);
                 }
             }
+            dh.set_on_only(xrank);
         }
     }
     if xrank != me {
