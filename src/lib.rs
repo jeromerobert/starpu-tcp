@@ -202,6 +202,7 @@ impl RecvReq for Req {
 struct StarPUManager(HandleManager<Req, Req>);
 
 // https://stackoverflow.com/questions/27791532/how-do-i-create-a-global-mutable-singleton
+// TODO: as of Rust 1.63 it should be possible to make this safe
 fn singleton() -> &'static mut HandleManager<Req, Req> {
     static mut SINGLETON: MaybeUninit<StarPUManager> = MaybeUninit::uninit();
     static ONCE: Once = Once::new();
@@ -372,7 +373,7 @@ fn task_insert_v(codelet: *mut starpu_codelet, args: VaList) -> c_int {
 
 unsafe extern "C" fn unregister_hook(handle: starpu_data_handle_t) {
     // free the HandleData struct
-    Box::from_raw((*handle).mpi_data);
+    drop(Box::from_raw((*handle).mpi_data));
 }
 
 impl starpu_task {

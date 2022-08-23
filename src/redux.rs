@@ -78,7 +78,7 @@ pub unsafe fn perform(data_handle: starpu_data_handle_t) {
             (*args.taskB).cl = (*data_handle).redux_cl;
             (*args.taskB).set_sequential_consistency(0);
             (*args.taskB).get_handles_mut()[0] = data_handle;
-            taskBs.push((*args).taskB);
+            taskBs.push(args.taskB);
             starpu_task_insert(
                 &read_callback as *const starpu_codelet as *mut starpu_codelet,
                 starpu_data_access_mode_STARPU_R,
