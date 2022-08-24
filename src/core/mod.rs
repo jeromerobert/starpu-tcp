@@ -22,7 +22,7 @@ use std::sync::Mutex;
 #[cfg(feature = "debug")]
 use tracing_mutex::stdsync::TracingMutex as Mutex;
 
-use self::queue::{Task, TaskQueue};
+use self::queue::TaskQueue;
 pub type Rank = u16;
 pub type Tag = i64;
 
@@ -622,17 +622,12 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
     }
 
     fn push_send_req(&'static self, req: S) {
-        let size = req.size();
         let prio = req.priority();
         let queue_req = SendReqTask {
             delegate: req,
             peer: self,
         };
-        if size < 16 {
-            queue_req.run();
-        } else {
-            self.write_tasks.push(queue_req, prio);
-        }
+        self.write_tasks.push(queue_req, prio);
     }
 
     fn send(&'static self, req: S) {
