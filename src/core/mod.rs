@@ -9,10 +9,14 @@ use core::time::Duration;
 use futures::executor::block_on;
 use log::*;
 use pnet::datalink;
-use std::fmt::Debug;
-use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::{thread::sleep, time::SystemTime};
+use std::{
+    env,
+    fmt::Debug,
+    io::{Read, Write},
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
+    thread::{self, sleep},
+    time::SystemTime,
+};
 mod multimap;
 mod queue;
 mod topology;
@@ -90,7 +94,7 @@ pub trait RecvReq: Send + Sync + Debug {
     type Buf: AsMut<[u8]> + Debug + Send + Sync;
     fn tag(&self) -> Tag;
     fn create_buf(size: usize) -> Self::Buf;
-    fn finish(&self, buf: Self::Buf);
+    fn finish(&self, buf: &mut Self::Buf);
     fn early(&self) -> bool;
 }
 
@@ -383,6 +387,8 @@ struct Peer<S: SendReq + 'static, R: RecvReq + 'static> {
     #[cfg(feature = "debug")]
     watchdog: Mutex<Option<vigil::Vigil>>,
     write_tasks: queue::TaskQueue<SendReqTask<S, R>>,
+    /// Thread to avoid that early read are executed in the submission thread. Executing read in the submission thread slow down the submission.
+    read_tasks: queue::TaskQueue<ReadReqTask<R>>,
     log_data_size: usize,
 }
 
@@ -392,7 +398,7 @@ struct SendReqTask<S: SendReq + 'static, R: RecvReq + 'static> {
 }
 
 impl<S: SendReq, R: RecvReq> queue::Task for SendReqTask<S, R> {
-    fn run(&self) {
+    fn run(&mut self) {
         let req = &self.delegate;
         trace!("Sending {} to {}", req.tag(), self.peer.rank);
         {
@@ -422,6 +428,21 @@ impl<S: SendReq, R: RecvReq> queue::Task for SendReqTask<S, R> {
 
     fn size(&self) -> usize {
         self.delegate.size()
+    }
+}
+
+struct ReadReqTask<R: RecvReq + 'static> {
+    delegate: R,
+    buffer: R::Buf,
+}
+
+impl<R: RecvReq> queue::Task for ReadReqTask<R> {
+    fn run(&mut self) {
+        self.delegate.finish(&mut self.buffer);
+    }
+
+    fn size(&self) -> usize {
+        0
     }
 }
 
@@ -464,6 +485,7 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
     fn new(
         rank: Rank,
         write_tasks: TaskQueue<SendReqTask<S, R>>,
+        read_tasks: TaskQueue<ReadReqTask<R>>,
         logging_threshold: usize,
         me: Rank,
     ) -> Self {
@@ -484,6 +506,7 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
             #[cfg(feature = "debug")]
             watchdog: Mutex::new(None),
             write_tasks,
+            read_tasks,
             log_data_size: (el * mib) as usize,
         }
     }
@@ -616,8 +639,8 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
         } else {
             p.read_exact(buf.as_mut()).unwrap();
         }
-        if let Some((r, buf)) = self.recv_reqs.pop1_or_insert2(tag, buf) {
-            r.finish(buf);
+        if let Some((r, mut buf)) = self.recv_reqs.pop1_or_insert2(tag, buf) {
+            r.finish(&mut buf);
         } // else this is an early request that will be finished later
     }
 
@@ -658,7 +681,13 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
         let early = req.early();
         if let Some((req, buf)) = self.recv_reqs.insert1_or_pop2(tag, req) {
             // Data was received before the request was posted (early request)
-            req.finish(buf);
+            self.read_tasks.push(
+                ReadReqTask {
+                    delegate: req,
+                    buffer: buf,
+                },
+                0,
+            );
         }
         if !early {
             // Notify the sender that we are ready to receive
@@ -697,9 +726,24 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Cluster<S, R> {
         let ws: usize = cn.world_size() as usize;
         let mut peers = Vec::with_capacity(ws);
         let lms: usize = parse_env_var("STARPU_TCP_LOG_MAP_SIZE", usize::MAX);
-        let q = TaskQueue::with_logging(lms, format!("[{}] reqs to write: ", cn.rank()));
+        let thread_id = match env::var("STARPU_TCP_SYNC_SUB") {
+            Err(_) => Some(thread::current().id()),
+            Ok(_) => None,
+        };
+        let wq = TaskQueue::new(lms, format!("[{}] reqs to write: ", cn.rank()), thread_id);
+        let rq = TaskQueue::new(
+            lms,
+            format!("[{}] reqs to read: ", cn.rank()),
+            Some(thread::current().id()),
+        );
         for rank in 0..ws {
-            peers.push(Peer::new(rank as Rank, q.clone(), lms, cn.rank()));
+            peers.push(Peer::new(
+                rank as Rank,
+                wq.clone(),
+                rq.clone(),
+                lms,
+                cn.rank(),
+            ));
         }
         assert!(ws >= 1);
         Cluster {

@@ -171,7 +171,7 @@ impl RecvReq for Req {
         unsafe { StarPUBuffer::with_size(size) }
     }
 
-    fn finish(&self, mut buf: Self::Buf) {
+    fn finish(&self, buf: &mut Self::Buf) {
         if !self.handle.is_null() {
             let b = buf.as_mut();
             unsafe {

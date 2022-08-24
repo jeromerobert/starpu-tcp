@@ -1,7 +1,9 @@
 use std::{
     env,
-    sync::atomic::AtomicUsize,
-    sync::{atomic::Ordering, Arc, Condvar, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Condvar, Mutex,
+    },
     thread::{self, ThreadId},
 };
 
@@ -12,7 +14,7 @@ pub type Priority = isize;
 
 pub trait Task {
     /// Execute the task
-    fn run(&self);
+    fn run(&mut self);
     /// The size of the data associated to this task.
     /// This is only used for logging and statistics
     fn size(&self) -> usize;
@@ -58,7 +60,7 @@ impl<T: Task + Send + Sync + 'static> TaskQueue<T> {
             let mut l = self.tasks.0.lock().unwrap();
             let ot = l.pop();
             match ot {
-                Some(task) => {
+                Some(mut task) => {
                     if l.len() > 0 && l.len() % threshold == 0 {
                         debug!("{}{}", label, l.len());
                     }
@@ -75,11 +77,7 @@ impl<T: Task + Send + Sync + 'static> TaskQueue<T> {
         }
     }
 
-    pub fn with_logging(threshold: usize, label: String) -> Self {
-        let thread_id = match env::var("STARPU_TCP_SYNC_SUB") {
-            Err(_) => Some(thread::current().id()),
-            Ok(_) => None,
-        };
+    pub fn new(threshold: usize, label: String, thread_id: Option<ThreadId>) -> Self {
         let sync_prio_size = match env::var("STARPU_TCP_SYNC_PRIO") {
             Err(_) => 0,
             Ok(s) => s.parse().unwrap(),
@@ -110,7 +108,7 @@ impl<T: Task + Send + Sync + 'static> TaskQueue<T> {
         r
     }
 
-    pub fn push(&self, task: T, priority: isize) {
+    pub fn push(&self, mut task: T, priority: isize) {
         if task.size() < self.sync_small {
             task.run();
         } else {
@@ -136,7 +134,7 @@ impl<T: Task + Send + Sync + 'static> TaskQueue<T> {
         }
     }
 
-    fn push_with_lock(&self, task: T, priority: isize) {
+    fn push_with_lock(&self, mut task: T, priority: isize) {
         let mut l = self.tasks.0.lock().unwrap();
         let size_before = l.len();
         if self.may_sync && self.is_sync(l.highest(), priority) {
