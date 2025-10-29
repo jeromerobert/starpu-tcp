@@ -14,9 +14,9 @@
 #![feature(const_maybe_uninit_zeroed)] // https://github.com/rust-lang/rust/issues/91850
 include!(concat!(env!("OUT_DIR"), "/starpu_coherency.rs"));
 include!(concat!(env!("OUT_DIR"), "/starpu_mpi.rs"));
-mod core;
+mod engine;
 mod redux;
-use crate::core::{HandleData, HandleManager, Rank, RecvReq, SendReq, Tag};
+use crate::engine::{HandleData, HandleManager, Rank, RecvReq, SendReq, Tag};
 use std::os::raw::{c_char, c_int, c_uint, c_ulong, c_void};
 use std::{ffi::VaList, mem::MaybeUninit, sync::Once};
 extern crate log;
@@ -95,7 +95,7 @@ impl StarPUBuffer {
             raw: std::ptr::null_mut(),
         };
         if size > 0 {
-            starpu_malloc(&mut r.raw, size as size_t);
+            starpu_malloc(&mut r.raw, size);
         }
         r
     }
@@ -178,7 +178,7 @@ impl RecvReq for Req {
                 let r = starpu_data_unpack(
                     self.handle,
                     b.as_mut_ptr() as *mut c_void,
-                    b.len() as size_t,
+                    b.len(),
                 );
                 assert_eq!(r, 0);
                 // Because starpu_data_unpack has freed the memory
@@ -476,7 +476,7 @@ unsafe fn task_insert_create(
             }
             STARPU_VALUE => {
                 let ptr: *mut c_void = varg_list.arg();
-                let ptr_size: c_ulong = varg_list.arg();
+                let ptr_size: usize = varg_list.arg();
                 starpu_codelet_pack_arg(&mut state, ptr, ptr_size)
             }
             STARPU_PRIORITY => task.priority = varg_list.arg(),
