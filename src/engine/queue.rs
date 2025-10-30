@@ -55,13 +55,13 @@ impl<T> Clone for TaskQueue<T> {
 }
 
 impl<T: Task + Send + Sync + 'static> TaskQueue<T> {
-    fn run_tasks(&self, threshold: usize, label: String) {
+    fn run_tasks(&self, threshold: usize, label: &str) {
         loop {
             let mut l = self.tasks.0.lock().unwrap();
             let ot = l.pop();
             match ot {
                 Some(mut task) => {
-                    if l.len() > 0 && l.len() % threshold == 0 {
+                    if l.len() > 0 && l.len().is_multiple_of(threshold) {
                         debug!("{}{}", label, l.len());
                     }
                     drop(l);
@@ -71,21 +71,15 @@ impl<T: Task + Send + Sync + 'static> TaskQueue<T> {
                 None => {
                     // we don't use the lock
                     // https://rust-lang.github.io/rust-clippy/master/index.html#let_underscore_lock
-                    std::mem::drop(self.tasks.1.wait(l).unwrap());
+                    drop(self.tasks.1.wait(l).unwrap());
                 }
             }
         }
     }
 
     pub fn new(threshold: usize, label: String, thread_id: Option<ThreadId>) -> Self {
-        let sync_prio_size = match env::var("STARPU_TCP_SYNC_PRIO") {
-            Err(_) => 0,
-            Ok(s) => s.parse().unwrap(),
-        };
-        let sync_small = match env::var("STARPU_TCP_SYNC_SMALL") {
-            Err(_) => 0,
-            Ok(s) => s.parse().unwrap(),
-        };
+        let sync_prio_size = env::var("STARPU_TCP_SYNC_PRIO").map_or(0, |s| s.parse().unwrap());
+        let sync_small = env::var("STARPU_TCP_SYNC_SMALL").map_or(0, |s| s.parse().unwrap());
         let may_sync = env::var("STARPU_TCP_MAY_SYNC").is_ok();
         let r = Self {
             thread_id,
@@ -99,10 +93,10 @@ impl<T: Task + Send + Sync + 'static> TaskQueue<T> {
         };
         let rr = r.clone();
         // TODO: Only one thread for all peer may not be enough
-        std::thread::Builder::new()
+        thread::Builder::new()
             .name("Writer".to_string())
             .spawn(move || {
-                rr.run_tasks(threshold, label);
+                rr.run_tasks(threshold, &label);
             })
             .unwrap();
         r
@@ -126,12 +120,8 @@ impl<T: Task + Send + Sync + 'static> TaskQueue<T> {
             // The queue is small enough so we keep are async
             return false;
         }
-        match top_prio {
-            // True if this task is urgent
-            Some(p) => priority > p,
-            // The queue is empty so all tasks are concidered urgent
-            None => true,
-        }
+        // True if this task is urgent. If the queue is empty so all tasks are concidered urgent.
+        top_prio.is_none_or(|p| priority > p)
     }
 
     fn push_with_lock(&self, mut task: T, priority: isize) {
@@ -155,6 +145,6 @@ impl<T: Task + Send + Sync + 'static> TaskQueue<T> {
     pub fn log_stats(&self) {
         let mt: usize = self.max_tasks.load(Ordering::Relaxed);
         let ms: usize = self.max_size.load(Ordering::Relaxed);
-        debug!("TaskQueue: max_tasks={}, max_size={}", mt, ms);
+        debug!("TaskQueue: max_tasks={mt}, max_size={ms}");
     }
 }

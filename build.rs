@@ -1,5 +1,3 @@
-extern crate bindgen;
-
 use std::env;
 use std::path::PathBuf;
 use std::path::MAIN_SEPARATOR;
@@ -10,34 +8,29 @@ fn main() {
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     println!("cargo:rerun-if-env-changed=STARPU_SRC_DIR");
     println!("cargo:rerun-if-env-changed=STARPU_BUILD_DIR");
-    let starpu_i_inc = format!("-I{}{}include", starpu_src, MAIN_SEPARATOR);
-    let starpu_i_src = format!("-I{}{}src", starpu_src, MAIN_SEPARATOR);
-    let starpu_i_binc = format!("-I{}{}include", starpu_build, MAIN_SEPARATOR);
-    let starpu_i_bsrc = format!("-I{}{}src", starpu_build, MAIN_SEPARATOR);
+    let starpu_i_inc = format!("-I{starpu_src}{MAIN_SEPARATOR}include");
+    let starpu_i_src = format!("-I{starpu_src}{MAIN_SEPARATOR}src");
+    let build_inc = format!("-I{starpu_build}{MAIN_SEPARATOR}include");
+    let build_src = format!("-I{starpu_build}{MAIN_SEPARATOR}src");
     let coherency_header = format!(
-        "{}{1}src{1}datawizard{1}coherency.h",
-        starpu_src, MAIN_SEPARATOR
+        "{starpu_src}{MAIN_SEPARATOR}src{MAIN_SEPARATOR}datawizard{MAIN_SEPARATOR}coherency.h"
     );
     let coherency_rs = out_path.join("starpu_coherency.rs");
-    println!(
-        "cargo:rustc-link-search={}{1}src{1}.libs",
-        starpu_build, MAIN_SEPARATOR
-    );
+    println!("cargo:rustc-link-search={starpu_build}{MAIN_SEPARATOR}src{MAIN_SEPARATOR}.libs");
     let starpu_mpi_header = format!(
-        "{}{1}mpi{1}include{1}starpu_mpi.h",
-        starpu_src, MAIN_SEPARATOR
+        "{starpu_src}{MAIN_SEPARATOR}mpi{MAIN_SEPARATOR}include{MAIN_SEPARATOR}starpu_mpi.h"
     );
     let starpu_mpi_rs = out_path.join("starpu_mpi.rs");
     println!("cargo:rustc-link-lib=starpu-1.3");
     for h in [&coherency_header, &starpu_mpi_header] {
-        println!("cargo:rerun-if-changed={}", h);
+        println!("cargo:rerun-if-changed={h}");
     }
 
     let bindings = bindgen::Builder::default()
         .clang_arg(&starpu_i_inc)
         .clang_arg(&starpu_i_src)
-        .clang_arg(&starpu_i_binc)
-        .clang_arg(&starpu_i_bsrc)
+        .clang_arg(&build_inc)
+        .clang_arg(&build_src)
         .header(coherency_header)
         .allowlist_function("starpu_task_submit")
         .allowlist_function("starpu_codelet_pack_arg_init")
@@ -77,7 +70,7 @@ fn main() {
 
     let bindings = bindgen::Builder::default()
         .clang_arg(&starpu_i_inc)
-        .clang_arg(&starpu_i_binc)
+        .clang_arg(&build_inc)
         .header(starpu_mpi_header)
         .allowlist_type("starpu_mpi_tag_t")
         .allowlist_type("MPI_Comm")

@@ -1,13 +1,9 @@
-extern crate env_logger;
-extern crate ipnetwork;
-extern crate log;
-extern crate pnet;
 #[cfg(feature = "debug")]
 extern crate vigil;
 use bitvec::vec::BitVec;
 use core::time::Duration;
 use futures::executor::block_on;
-use log::*;
+use log::{debug, info, trace, warn};
 use pnet::datalink;
 use std::{
     env,
@@ -20,7 +16,7 @@ use std::{
 mod multimap;
 mod queue;
 mod topology;
-use multimap::*;
+use multimap::{DoubleTypeMultiMap, UnkValMap};
 #[cfg(not(feature = "debug"))]
 use std::sync::Mutex;
 #[cfg(feature = "debug")]
@@ -45,11 +41,11 @@ impl HandleData {
         Self { tag, rank, nodes }
     }
 
-    pub fn tag(&self) -> Tag {
+    pub const fn tag(&self) -> Tag {
         self.tag
     }
 
-    pub fn rank(&self) -> Rank {
+    pub const fn rank(&self) -> Rank {
         self.rank
     }
 
@@ -115,18 +111,18 @@ impl<S: 'static + SendReq + Send + Sync, R: 'static + RecvReq + Send> HandleMana
     }
 
     pub fn send(&'static self, rank: Rank, req: S) {
-        self.0.cluster.send(rank, req)
+        self.0.cluster.send(rank, req);
     }
 
     pub fn recv(&'static self, rank: Rank, req: R) {
         self.0.cluster.recv(rank, req);
     }
 
-    pub fn rank(&self) -> Rank {
+    pub const fn rank(&self) -> Rank {
         self.0.cluster.config.rank()
     }
 
-    pub fn world_size(&self) -> Rank {
+    pub const fn world_size(&self) -> Rank {
         self.0.cluster.config.world_size()
     }
 
@@ -140,13 +136,13 @@ impl<S: 'static + SendReq + Send + Sync, R: 'static + RecvReq + Send> HandleMana
     }
 }
 
-/// Private data of HandleManager
+/// Private data of `HandleManager`
 struct ManagerImpl<S: SendReq + Send + Sync + 'static, R: RecvReq + 'static> {
     cluster: Cluster<S, R>,
 }
 
 /// Get the local address (IP with port 0) for a given network CIDR or interface name
-fn bindSocketAddr(es: &str) -> SocketAddr {
+fn bind_socket_addr(es: &str) -> SocketAddr {
     let all = "0.0.0.0:0".parse().unwrap();
     let ipr = es.parse::<ipnetwork::IpNetwork>();
     let iprr = ipr.as_ref();
@@ -167,12 +163,12 @@ fn bindSocketAddr(es: &str) -> SocketAddr {
 }
 
 trait Serializable {
-    fn read<R: std::io::Read>(&mut self, reader: &mut R) -> std::io::Result<()>;
+    fn read<R: Read>(&mut self, reader: &mut R) -> std::io::Result<()>;
     fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()>;
 }
 
 impl Serializable for SocketAddr {
-    fn read<R: std::io::Read>(&mut self, reader: &mut R) -> std::io::Result<()> {
+    fn read<R: Read>(&mut self, reader: &mut R) -> std::io::Result<()> {
         let mut typ: u8 = 0;
         reader.read_exact(std::slice::from_mut(&mut typ))?;
         match typ {
@@ -188,20 +184,20 @@ impl Serializable for SocketAddr {
                 todo!()
             }
             _ => {
-                panic!("Protocol error: {}", typ);
+                panic!("Protocol error: {typ}");
             }
         }
         Ok(())
     }
 
-    fn write<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         match self {
-            SocketAddr::V4(a) => {
+            Self::V4(a) => {
                 writer.write_all(std::slice::from_ref(&4))?;
                 writer.write_all(&a.ip().octets())?;
                 writer.write_all(&a.port().to_ne_bytes())?;
             }
-            SocketAddr::V6(_) => {
+            Self::V6(_) => {
                 todo!()
             }
         }
@@ -210,7 +206,7 @@ impl Serializable for SocketAddr {
 }
 
 impl Serializable for [SocketAddr] {
-    fn read<R: std::io::Read>(&mut self, reader: &mut R) -> std::io::Result<()> {
+    fn read<R: Read>(&mut self, reader: &mut R) -> std::io::Result<()> {
         let mut world_size: Rank = 0;
         world_size.read(reader)?;
         assert_eq!(world_size, self.len() as Rank);
@@ -220,7 +216,7 @@ impl Serializable for [SocketAddr] {
         Ok(())
     }
 
-    fn write<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         let world_size: Rank = self.len() as Rank;
         world_size.write(writer)?;
         for addr in self {
@@ -231,13 +227,13 @@ impl Serializable for [SocketAddr] {
 }
 
 impl Serializable for Rank {
-    fn read<R: std::io::Read>(&mut self, reader: &mut R) -> std::io::Result<()> {
+    fn read<R: Read>(&mut self, reader: &mut R) -> std::io::Result<()> {
         let mut buf: [u8; 2] = [0; 2];
         reader.read_exact(&mut buf)?;
-        *self = Rank::from_ne_bytes(buf);
+        *self = Self::from_ne_bytes(buf);
         Ok(())
     }
-    fn write<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         writer.write_all(&self.to_ne_bytes())
     }
 }
@@ -255,12 +251,12 @@ struct InitServer {
 impl InitServer {
     fn new(rank: Rank) -> Self {
         if rank == 0 {
-            InitServer {
+            Self {
                 listener: Some(TcpListener::bind(RANK0_INIT_SRV).unwrap()),
                 streams: Vec::new(),
             }
         } else {
-            InitServer {
+            Self {
                 listener: None,
                 streams: Vec::new(),
             }
@@ -268,7 +264,7 @@ impl InitServer {
     }
 
     /// Send all bind address to all nodes
-    fn send(&mut self, topo: &Vec<SocketAddr>) {
+    fn send(&self, topo: &[SocketAddr]) {
         for mut stream in &self.streams {
             topo.write(&mut stream)
                 .expect("Error sending cluster addresses to a node");
@@ -276,7 +272,7 @@ impl InitServer {
     }
 
     /// Receive bind address from each node
-    async fn recv(&mut self, topo: &mut [SocketAddr]) {
+    fn recv(&mut self, topo: &mut [SocketAddr]) {
         if self.listener.is_none() {
             return;
         }
@@ -290,21 +286,21 @@ impl InitServer {
                 Ok(mut stream) => {
                     let mut rank: Rank = 0;
                     match rank.read(&mut stream) {
-                        Ok(_) => {}
+                        Ok(()) => {}
                         Err(e) => {
-                            warn!("Protocol error while reading rank: {}", e);
+                            warn!("Protocol error while reading rank: {e}");
                             continue;
                         }
-                    };
+                    }
                     if rank >= topo.len() as u16 {
-                        warn!("Protocol error: invalid rank: {}", rank);
+                        warn!("Protocol error: invalid rank: {rank}");
                     }
                     match topo[rank as usize].read(&mut stream) {
-                        Ok(_) => {
+                        Ok(()) => {
                             toread -= 1;
                         }
                         Err(e) => {
-                            warn!("Protocol error while reading IP: {}", e);
+                            warn!("Protocol error while reading IP: {e}");
                         }
                     }
                     tmp_streams[rank as usize] = Some(stream);
@@ -313,7 +309,7 @@ impl InitServer {
                     }
                 }
                 Err(err) => {
-                    warn!("TCP error: {}", err);
+                    warn!("TCP error: {err}");
                 }
             }
         }
@@ -335,21 +331,21 @@ struct MsgHeader {
 }
 
 impl MsgHeader {
-    fn new() -> Self {
-        MsgHeader {
+    const fn new() -> Self {
+        Self {
             t: MsgType::Data,
             tag: 0,
         }
     }
 }
 impl Serializable for MsgHeader {
-    fn read<R: std::io::Read>(&mut self, reader: &mut R) -> std::io::Result<()> {
+    fn read<R: Read>(&mut self, reader: &mut R) -> std::io::Result<()> {
         let mut buf: [u8; 1] = [0; 1];
         reader.read_exact(&mut buf)?;
         self.t = match buf[0] {
             0 => MsgType::Data,
             1 => MsgType::Ready,
-            t => panic!("Invalid message type: {}", t),
+            t => panic!("Invalid message type: {t}"),
         };
         let mut buf: [u8; 8] = [0; 8];
         reader.read_exact(&mut buf)?;
@@ -357,7 +353,7 @@ impl Serializable for MsgHeader {
         Ok(())
     }
 
-    fn write<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         let t: u8 = match self.t {
             MsgType::Data => 0,
             MsgType::Ready => 1,
@@ -365,7 +361,7 @@ impl Serializable for MsgHeader {
         writer.write_all(&[t])?;
         writer.write_all(&self.tag.to_ne_bytes())?;
         writer.flush()?;
-        trace!("{:?} written", self);
+        trace!("{self:?} written");
         Ok(())
     }
 }
@@ -386,9 +382,9 @@ struct Peer<S: SendReq + 'static, R: RecvReq + 'static> {
     pending_recv: Mutex<Vec<R>>,
     #[cfg(feature = "debug")]
     watchdog: Mutex<Option<vigil::Vigil>>,
-    write_tasks: queue::TaskQueue<SendReqTask<S, R>>,
+    write_tasks: TaskQueue<SendReqTask<S, R>>,
     /// Thread to avoid that early read are executed in the submission thread. Executing read in the submission thread slow down the submission.
-    read_tasks: queue::TaskQueue<ReadReqTask<R>>,
+    read_tasks: TaskQueue<ReadReqTask<R>>,
     log_data_size: usize,
 }
 
@@ -446,8 +442,9 @@ impl<R: RecvReq> queue::Task for ReadReqTask<R> {
     }
 }
 
+#[allow(clippy::missing_fields_in_debug)]
 impl<S: SendReq, R: RecvReq> Debug for Peer<S, R> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         f.debug_struct("Peer")
             .field("rank", &self.rank)
             .field("addr", &self.addr)
@@ -459,19 +456,15 @@ impl<S: SendReq, R: RecvReq> Debug for Peer<S, R> {
     }
 }
 
-fn zeroSocketAddr() -> SocketAddr {
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0)
+const fn zero_socket_addr() -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
 }
 
 fn parse_env_var<K: AsRef<std::ffi::OsStr>, T: std::str::FromStr>(key: K, default_val: T) -> T {
-    let k = key.as_ref().to_str().unwrap().to_string();
-    match std::env::var(key) {
-        Ok(s) => match s.parse::<T>() {
-            Ok(v) => v,
-            Err(_) => panic!("{} is not valid for {}", s, k),
-        },
-        Err(_) => default_val,
-    }
+    env::var(&key).map_or(default_val, |s| {
+        s.parse::<T>()
+            .unwrap_or_else(|_| panic!("{s} is not valid for {:?}", key.as_ref().display()))
+    })
 }
 
 impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
@@ -493,10 +486,10 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
         let el: f32 = parse_env_var("STARPU_TCP_LOG_DATA_SIZE", usize::MAX as f32 / mib);
         let recv_reqs = DoubleTypeMultiMap::new();
         let mut send_reqs = UnkValMap::new();
-        send_reqs.log(format!("[{}=>{}] Send req", me, rank), logging_threshold);
-        Peer {
+        send_reqs.log(format!("[{me}=>{rank}] Send req"), logging_threshold);
+        Self {
             rank,
-            addr: zeroSocketAddr(),
+            addr: zero_socket_addr(),
             stream: Mutex::new(None),
             connected: Mutex::new(false),
             recv_reqs,
@@ -528,7 +521,8 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
         }
     }
     #[cfg(not(feature = "debug"))]
-    fn watchdog_ping(&'static self) {}
+    #[allow(clippy::unused_self)]
+    const fn watchdog_ping(&'static self) {}
 
     /// Return true if this peer is responsible for initiating the TCP connection or if the
     /// connection is already established.
@@ -539,7 +533,7 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
         }
         // Number of connection owned by the peer (i.e the connection that it will initiate)
         let mut nc = (world_size - 1) / 2;
-        if world_size % 2 == 0 && me < world_size / 2 {
+        if world_size.is_multiple_of(2) && me < world_size / 2 {
             nc += 1;
         }
         if nc == 0 {
@@ -578,17 +572,19 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
             *o = Some(s.try_clone().unwrap());
         }
         // unstack pending requests
-        while let Some(r) = self.pending_send.lock().unwrap().pop() {
+        let mut lock = self.pending_send.lock().unwrap();
+        while let Some(r) = lock.pop() {
             self.send(r);
         }
-        while let Some(r) = self.pending_recv.lock().unwrap().pop() {
+        let mut lock = self.pending_recv.lock().unwrap();
+        while let Some(r) = lock.pop() {
             self.recv(r);
         }
     }
 
     fn start_read(&'static self, s: TcpStream) {
         let thread_name = format!("Peer {}", self.rank);
-        std::thread::Builder::new()
+        thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
                 self.read(s);
@@ -600,7 +596,7 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
         let mut header = MsgHeader::new();
         loop {
             if let Err(e) = header.read(&mut s) {
-                info!("Connection closed by peer: {}", e);
+                info!("Connection closed by peer: {e}");
                 break;
             }
             self.watchdog_ping();
@@ -617,7 +613,7 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
                     tag,
                 } => {
                     if let Some(r) = self.send_reqs.pop_or_insert_nv(tag) {
-                        self.push_send_req(r)
+                        self.push_send_req(r);
                     }
                 }
             }
@@ -658,10 +654,10 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Peer<S, R> {
         if req.early() {
             // We are in early request mode so we don't wait for ready notification
             // from the receiver
-            self.push_send_req(req)
+            self.push_send_req(req);
         } else if let Some(req) = self.send_reqs.pop_nv_or_insert(req.tag(), req) {
             // The receiver is already waiting so process right now
-            self.push_send_req(req)
+            self.push_send_req(req);
         } // else put it in pending request list
     }
 
@@ -709,13 +705,13 @@ fn connect_retry(addr: &SocketAddr) -> TcpStream {
         match r {
             Ok(stream) => return stream,
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
-                if SystemTime::now() > start + Duration::from_secs(5) {
-                    panic!("Cannot connect to {}", addr)
-                }
+                assert!(
+                    SystemTime::now() <= start + Duration::from_secs(5),
+                    "Cannot connect to {addr}"
+                );
                 sleep(Duration::from_secs_f32(0.1));
-                continue;
             }
-            Err(e) => panic!("Cannot connect to {}: {}", addr, e),
+            Err(e) => panic!("Cannot connect to {addr}: {e}"),
         }
     }
 }
@@ -746,7 +742,7 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Cluster<S, R> {
             ));
         }
         assert!(ws >= 1);
-        Cluster {
+        Self {
             config: cn,
             peers,
             listener: None,
@@ -754,38 +750,37 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Cluster<S, R> {
     }
 
     fn start(&'static mut self) {
-        let listener = TcpListener::bind(bindSocketAddr(&self.config.bindAddr())).unwrap();
+        let listener = TcpListener::bind(bind_socket_addr(self.config.bind_addr())).unwrap();
         let laddr = listener.local_addr().unwrap();
         let mut is = InitServer::new(self.config.rank());
         info!("Rank {} listening on {:?}", self.config.rank(), laddr);
-        let mut peerAddrs = vec![zeroSocketAddr(); self.config.world_size() as usize];
-        let f = is.recv(&mut peerAddrs);
-        let socketStr = self.config.rank0() + ":" + RANK0_INIT_PORT;
-        let mut sAddr = socketStr
+        let mut peer_addrs = vec![zero_socket_addr(); self.config.world_size() as usize];
+        is.recv(&mut peer_addrs);
+        let socket_str = self.config.rank0() + ":" + RANK0_INIT_PORT;
+        let mut s_addr = socket_str
             .to_socket_addrs()
-            .unwrap_or_else(|_| panic!("{:?}", socketStr));
+            .unwrap_or_else(|_| panic!("{socket_str:?}"));
         // Rank 0 is now ready to receive each node address, so send them
-        let rank0 = sAddr.next().unwrap();
+        let rank0 = s_addr.next().unwrap();
         let mut stream = connect_retry(&rank0);
         self.config.rank().write(&mut stream).unwrap();
         laddr.write(&mut stream).unwrap();
-        block_on(f);
         // FIXME: how to avoid this clone ?
-        let nodeAddr0 = peerAddrs.clone();
+        let node_addr_0 = peer_addrs.clone();
         // At this point only the rank 0 have the whole list of node address.
         // It now send them to each node
         let f2 = async {
             // And each node receive it
-            peerAddrs
+            peer_addrs
                 .read(&mut stream)
                 .expect("Cannot receive nodes addresses");
         };
-        is.send(&nodeAddr0);
+        is.send(&node_addr_0);
         block_on(f2);
         for (i, p) in self.peers.iter_mut().enumerate() {
-            p.addr = peerAddrs[i];
+            p.addr = peer_addrs[i];
         }
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             self.server_loop(listener);
         });
     }
@@ -818,7 +813,7 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Cluster<S, R> {
                     break;
                 }
                 Err(e) => {
-                    warn!("{:?}", e);
+                    warn!("{e:?}");
                 }
             }
         }
@@ -879,11 +874,8 @@ impl<S: SendReq + 'static, R: RecvReq + 'static> Cluster<S, R> {
     }
 
     fn shutdown(&self) {
-        match &self.listener {
-            Some(l) => {
-                l.set_nonblocking(true).unwrap();
-            }
-            None => {}
+        if let Some(l) = &self.listener {
+            l.set_nonblocking(true).unwrap();
         }
         if !self.peers.is_empty() {
             self.peers[0].write_tasks.log_stats();

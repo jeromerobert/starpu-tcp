@@ -1,13 +1,13 @@
 use super::Rank;
 use std::env;
 const LOCALHOST: &str = "127.0.0.1";
-/// TODO: add full port range configuration (like btl_tcp_port_min_v4 btl_tcp_port_range_v4
-/// oob_tcp_static_ipv4_ports oob_tcp_dynamic_ipv4_ports oob_tcp_if_include)
+/// TODO: add full port range configuration (like `btl_tcp_port_min_v4` `btl_tcp_port_range_v4`
+/// `oob_tcp_static_ipv4_ports` `oob_tcp_dynamic_ipv4_ports` `oob_tcp_if_include`)
 trait Topology {
     /// Check if this finder is able to work. If it does not work the
     /// next one will be tested
     fn supported(&mut self) -> bool;
-    fn bindAddr(&self) -> String;
+    fn bind_addr(&self) -> String;
     fn rank(&self) -> Rank;
     fn world_size(&self) -> Rank;
 }
@@ -26,9 +26,9 @@ struct LSFRank0Getter {
 }
 
 impl LSFRank0Getter {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
-            rank0: String::from(""),
+            rank0: String::new(),
         }
     }
 }
@@ -39,7 +39,7 @@ struct OpenMPITopology {
 }
 
 impl OpenMPITopology {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             rank: 0,
             world_size: 0,
@@ -61,12 +61,9 @@ impl Topology for OpenMPITopology {
             _ => false,
         }
     }
-    fn bindAddr(&self) -> String {
-        match env::var("OMPI_MCA_btl_tcp_if_include") {
-            Ok(e) => e,
-            // With OpenMPI the default is 0.0.0.0. Here we increase security
-            _ => String::from(LOCALHOST),
-        }
+    fn bind_addr(&self) -> String {
+        // With OpenMPI the default is 0.0.0.0. Here we increase security
+        env::var("OMPI_MCA_btl_tcp_if_include").unwrap_or_else(|_| String::from(LOCALHOST))
     }
     fn rank(&self) -> Rank {
         self.rank
@@ -94,16 +91,16 @@ impl Rank0Getter for LSFRank0Getter {
 }
 
 pub struct Config {
-    bindAddr: String,
+    bind_addr: String,
     rank: Rank,
     world_size: Rank,
     rank0: String,
 }
 
 impl Config {
-    pub fn create() -> Config {
-        let mut r = Config {
-            bindAddr: String::from(LOCALHOST),
+    pub fn create() -> Self {
+        let mut r = Self {
+            bind_addr: String::from(LOCALHOST),
             rank: 0,
             world_size: 1,
             rank0: String::from(LOCALHOST),
@@ -114,7 +111,7 @@ impl Config {
         ];
         for mut i in l {
             if i.supported() {
-                r.bindAddr = i.bindAddr();
+                r.bind_addr = i.bind_addr();
                 r.rank = i.rank();
                 r.world_size = i.world_size();
             }
@@ -129,20 +126,20 @@ impl Config {
             }
         }
         if r.rank0 == LOCALHOST {
-            r.bindAddr = String::from(LOCALHOST);
+            r.bind_addr = String::from(LOCALHOST);
         }
         r
     }
 
-    pub fn bindAddr(&self) -> String {
-        self.bindAddr.clone()
+    pub fn bind_addr(&self) -> &str {
+        &self.bind_addr
     }
 
-    pub fn rank(&self) -> Rank {
+    pub const fn rank(&self) -> Rank {
         self.rank
     }
 
-    pub fn world_size(&self) -> Rank {
+    pub const fn world_size(&self) -> Rank {
         self.world_size
     }
 

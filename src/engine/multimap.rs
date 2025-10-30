@@ -1,5 +1,5 @@
 use log::debug;
-use std::cmp;
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -13,14 +13,14 @@ pub struct PrioQueue<K, V> {
     size: usize,
 }
 
-impl<K: cmp::Ord + Clone, V> PrioQueue<K, V> {
-    pub fn new() -> Self {
-        PrioQueue {
+impl<K: Ord + Clone, V> PrioQueue<K, V> {
+    pub const fn new() -> Self {
+        Self {
             data: BTreeMap::new(),
             size: 0,
         }
     }
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.size
     }
 
@@ -56,7 +56,7 @@ struct UnsafeNoValMap<K: Hash + Eq + Debug, V: Debug> {
     unk_size: usize,
 }
 
-impl<K: Hash + Eq + Debug, V: Debug> UnsafeNoValMap<K, V> {
+impl<K: Hash + Eq + Debug + Copy, V: Debug> UnsafeNoValMap<K, V> {
     pub fn pop_or_insert_nv(&mut self, key: K) -> Option<V> {
         let r = self.internal.pop(&key);
         if r.is_none() {
@@ -83,11 +83,11 @@ impl<K: Hash + Eq + Debug, V: Debug> UnsafeNoValMap<K, V> {
         }
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.internal.len()
     }
 
-    pub fn unk_len(&self) -> usize {
+    pub const fn unk_len(&self) -> usize {
         self.unk_size
     }
 }
@@ -100,16 +100,16 @@ pub struct UnkValMap<K: Hash + Eq + Debug, V: Debug> {
 }
 
 impl<K: Hash + Eq + Debug, V: Debug> Debug for UnkValMap<K, V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         write!(f, "{:?}", *self.data.lock().unwrap())
     }
 }
 
-impl<K: Hash + Eq + Debug, V: Debug> UnkValMap<K, V> {
+impl<K: Hash + Eq + Debug + Copy, V: Debug> UnkValMap<K, V> {
     pub fn new() -> Self {
         Self {
             data: Mutex::new(UnsafeNoValMap::new()),
-            log_label: "".to_string(),
+            log_label: String::new(),
             log_threshold: usize::MAX,
         }
     }
@@ -124,20 +124,20 @@ impl<K: Hash + Eq + Debug, V: Debug> UnkValMap<K, V> {
     }
     pub fn pop_or_insert_nv(&self, key: K) -> Option<V> {
         let mut l = self.data.lock().unwrap();
-        if l.len() > 0 && l.len() % self.log_threshold == 0 {
+        if l.len() > 0 && l.len().is_multiple_of(self.log_threshold) {
             debug!("{} known size: {}", self.log_label, l.len());
         }
-        if l.unk_len() > 0 && l.unk_len() % self.log_threshold == 0 {
+        if l.unk_len() > 0 && l.unk_len().is_multiple_of(self.log_threshold) {
             debug!("{} unknown size: {}", self.log_label, l.unk_len());
         }
         l.pop_or_insert_nv(key)
     }
     pub fn pop_nv_or_insert(&self, key: K, value: V) -> Option<V> {
         let mut l = self.data.lock().unwrap();
-        if l.len() > 0 && l.len() % self.log_threshold == 0 {
+        if l.len() > 0 && l.len().is_multiple_of(self.log_threshold) {
             debug!("{} known size: {}", self.log_label, l.len());
         }
-        if l.unk_len() > 0 && l.unk_len() % self.log_threshold == 0 {
+        if l.unk_len() > 0 && l.unk_len().is_multiple_of(self.log_threshold) {
             debug!("{} unknown size: {}", self.log_label, l.unk_len());
         }
         l.pop_nv_or_insert(key, value)
@@ -147,23 +147,22 @@ impl<K: Hash + Eq + Debug, V: Debug> UnkValMap<K, V> {
 #[derive(Debug)]
 struct UnsafeMultiSet<K: Hash + Eq + Debug>(HashMap<K, usize>);
 
-impl<K: Hash + Eq + Debug> UnsafeMultiSet<K> {
+impl<K: Hash + Eq + Debug + Copy> UnsafeMultiSet<K> {
     pub fn new() -> Self {
         Self(HashMap::new())
     }
 
     pub fn pop(&mut self, key: &K) -> bool {
-        let h = &mut self.0;
-        match h.get_mut(key) {
-            Some(vc) => {
-                *vc -= 1;
-                if *vc == 0 {
-                    h.remove(key);
-                }
-                true
+        if let Entry::Occupied(mut entry) = self.0.entry(*key) {
+            let vc = entry.get_mut();
+            *vc -= 1;
+            if *vc == 0 {
+                entry.remove();
             }
-            None => false,
+            return true;
         }
+
+        false
     }
     pub fn insert(&mut self, key: K) {
         let h = &mut self.0;
@@ -208,20 +207,17 @@ impl<K: Hash + Eq + Debug, V: Debug> UnsafeMultiMap<K, V> {
     }
     pub fn insert(&mut self, key: K, value: V) {
         let h = &mut self.data;
-        match h.get_mut(&key) {
-            Some(vc) => {
-                vc.push_front(value);
-            }
-            None => {
-                let mut vc = VecDeque::with_capacity(1);
-                vc.push_front(value);
-                h.insert(key, vc);
-            }
+        if let Some(vc) = h.get_mut(&key) {
+            vc.push_front(value);
+        } else {
+            let mut vc = VecDeque::with_capacity(1);
+            vc.push_front(value);
+            h.insert(key, vc);
         }
         self.size += 1;
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.size
     }
 }
@@ -284,7 +280,7 @@ impl<K: Hash + Eq + Debug, V1: Debug, V2: Debug> DoubleTypeMultiMap<K, V1, V2> {
 }
 
 impl<K: Hash + Eq + Debug, V1: Debug, V2: Debug> Debug for DoubleTypeMultiMap<K, V1, V2> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         write!(f, "{:?}", *self.data.lock().unwrap())
     }
 }

@@ -2,25 +2,24 @@
 // With redux.rs they are the 2 ones which keep all unsafe function and everything specific to starpu
 // Everything not specific to starpu should go to core and be safe.
 
-#![allow(non_upper_case_globals)]
-#![allow(non_camel_case_types)]
-#![allow(non_snake_case)]
-#![allow(deref_nullptr)]
-#![allow(improper_ctypes)]
-#![allow(clippy::approx_constant)]
-#![allow(clippy::too_many_arguments)]
-#![allow(clippy::useless_transmute)]
 #![feature(c_variadic)] // https://github.com/rust-lang/rust/issues/44930
-#![feature(const_maybe_uninit_zeroed)] // https://github.com/rust-lang/rust/issues/91850
-include!(concat!(env!("OUT_DIR"), "/starpu_coherency.rs"));
-include!(concat!(env!("OUT_DIR"), "/starpu_mpi.rs"));
+
+mod sys {
+    #![allow(unused)]
+    #![allow(warnings)]
+    #![allow(clippy::all)]
+    #![allow(clippy::nursery)]
+    include!(concat!(env!("OUT_DIR"), "/starpu_coherency.rs"));
+    include!(concat!(env!("OUT_DIR"), "/starpu_mpi.rs"));
+}
+#[allow(clippy::wildcard_imports)]
+use sys::*;
 mod engine;
 mod redux;
 use crate::engine::{HandleData, HandleManager, Rank, RecvReq, SendReq, Tag};
-use std::os::raw::{c_char, c_int, c_uint, c_ulong, c_void};
+use log::{debug, trace};
+use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::{ffi::VaList, mem::MaybeUninit, sync::Once};
-extern crate log;
-use log::*;
 
 #[derive(Debug)]
 struct StarPUBuffer {
@@ -44,7 +43,7 @@ struct Req {
 
 impl Req {
     fn without_handle(rank: Rank) -> Self {
-        Req {
+        Self {
             handle: std::ptr::null_mut(),
             rank,
             tag: -1,
@@ -59,14 +58,14 @@ unsafe impl Send for Req {}
 unsafe impl Sync for Req {}
 
 fn data_from_handle<'a>(handle: starpu_data_handle_t) -> &'a mut HandleData {
-    unsafe { Box::leak(Box::from_raw((*handle).mpi_data as *mut HandleData)) }
+    unsafe { Box::leak(Box::from_raw((*handle).mpi_data.cast::<HandleData>())) }
 }
 
 fn size_from_handle(handle: starpu_data_handle_t) -> starpu_ssize_t {
     let mut size: starpu_ssize_t = 0;
     if !handle.is_null() {
         unsafe {
-            starpu_data_pack(handle, std::ptr::null_mut(), &mut size);
+            starpu_data_pack(handle, std::ptr::null_mut(), &raw mut size);
         }
     }
     size
@@ -75,27 +74,27 @@ fn size_from_handle(handle: starpu_data_handle_t) -> starpu_ssize_t {
 impl StarPUBuffer {
     unsafe fn from_handle(handle: starpu_data_handle_t) -> Self {
         if handle.is_null() {
-            return StarPUBuffer {
+            return Self {
                 size: 0,
                 raw: std::ptr::null_mut(),
             };
         }
         let mut size = size_from_handle(handle);
         let mut raw: *mut c_void = std::ptr::null_mut();
-        let r = starpu_data_pack(handle, &mut raw, &mut size);
+        let r = starpu_data_pack(handle, &raw mut raw, &raw mut size);
         assert_eq!(r, 0);
-        StarPUBuffer {
+        Self {
             size: size as usize,
             raw,
         }
     }
     unsafe fn with_size(size: usize) -> Self {
-        let mut r = StarPUBuffer {
-            size: size as usize,
+        let mut r = Self {
+            size,
             raw: std::ptr::null_mut(),
         };
         if size > 0 {
-            starpu_malloc(&mut r.raw, size);
+            starpu_malloc(&raw mut r.raw, size);
         }
         r
     }
@@ -103,7 +102,7 @@ impl StarPUBuffer {
 
 impl AsRef<[u8]> for StarPUBuffer {
     fn as_ref(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.raw as *mut u8, self.size) }
+        unsafe { std::slice::from_raw_parts(self.raw.cast::<u8>(), self.size) }
     }
 }
 
@@ -129,8 +128,7 @@ impl SendReq for Req {
                 starpu_data_release(self.handle);
             }
         }
-        if self.callback.is_some() {
-            let f = self.callback.unwrap();
+        if let Some(f) = self.callback {
             unsafe {
                 f(self.cb_args);
             }
@@ -156,7 +154,7 @@ impl SendReq for Req {
 
 impl AsMut<[u8]> for StarPUBuffer {
     fn as_mut(&mut self) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.raw as *mut u8, self.size) }
+        unsafe { std::slice::from_raw_parts_mut(self.raw.cast::<u8>(), self.size) }
     }
 }
 
@@ -175,19 +173,14 @@ impl RecvReq for Req {
         if !self.handle.is_null() {
             let b = buf.as_mut();
             unsafe {
-                let r = starpu_data_unpack(
-                    self.handle,
-                    b.as_mut_ptr() as *mut c_void,
-                    b.len(),
-                );
+                let r = starpu_data_unpack(self.handle, b.as_mut_ptr().cast::<c_void>(), b.len());
                 assert_eq!(r, 0);
                 // Because starpu_data_unpack has freed the memory
                 buf.raw = std::ptr::null_mut();
                 starpu_data_release(self.handle);
             }
         }
-        if self.callback.is_some() {
-            let f = self.callback.unwrap();
+        if let Some(f) = self.callback {
             unsafe {
                 f(self.cb_args);
             }
@@ -203,6 +196,7 @@ struct StarPUManager(HandleManager<Req, Req>);
 
 // https://stackoverflow.com/questions/27791532/how-do-i-create-a-global-mutable-singleton
 // TODO: as of Rust 1.63 it should be possible to make this safe
+#[allow(static_mut_refs)]
 fn singleton() -> &'static mut HandleManager<Req, Req> {
     static mut SINGLETON: MaybeUninit<StarPUManager> = MaybeUninit::uninit();
     static ONCE: Once = Once::new();
@@ -233,12 +227,12 @@ fn find_executee_node(task: &starpu_task, xrank: c_int) -> c_int {
 }
 
 unsafe extern "C" fn recv_cb(arg: *mut c_void) {
-    let req = Box::from_raw(arg as *mut Req);
+    let req = Box::from_raw(arg.cast::<Req>());
     singleton().recv(req.rank as Rank, *req);
 }
 
 unsafe extern "C" fn send_cb(arg: *mut c_void) {
-    let req = Box::from_raw(arg as *mut Req);
+    let req = Box::from_raw(arg.cast::<Req>());
     singleton().send(req.rank as Rank, *req);
 }
 
@@ -269,7 +263,7 @@ fn send_with_callback(
             handle,
             starpu_data_access_mode_STARPU_R,
             Some(send_cb),
-            req as *mut c_void,
+            req.cast::<c_void>(),
         );
     }
 }
@@ -300,7 +294,7 @@ fn recv_with_callback(
             handle,
             starpu_data_access_mode_STARPU_W,
             Some(recv_cb),
-            req as *mut c_void,
+            req.cast::<c_void>(),
         );
     }
 }
@@ -373,7 +367,7 @@ fn task_insert_v(codelet: *mut starpu_codelet, args: VaList) -> c_int {
 
 unsafe extern "C" fn unregister_hook(handle: starpu_data_handle_t) {
     // free the HandleData struct
-    drop(Box::from_raw((*handle).mpi_data));
+    drop(Box::from_raw((*handle).mpi_data.cast::<HandleData>()));
 }
 
 impl starpu_task {
@@ -424,8 +418,8 @@ impl starpu_task {
     }
 }
 
-/// Return true if val is a valid StarPU mode (ex: STARPU_RW)
-fn is_mode(val: u32) -> bool {
+/// Return true if val is a valid `StarPU` mode (ex: `STARPU_RW`)
+const fn is_mode(val: u32) -> bool {
     (val & starpu_data_access_mode_STARPU_W != 0)
         || (val & starpu_data_access_mode_STARPU_R != 0)
         || (val & starpu_data_access_mode_STARPU_REDUX != 0)
@@ -436,11 +430,11 @@ fn is_mode(val: u32) -> bool {
 unsafe fn task_insert_create(
     cl: &mut starpu_codelet,
     task: &mut starpu_task,
-    mut varg_list: std::ffi::VaList,
+    mut varg_list: VaList,
 ) -> Rank {
     let mut current_buffer: c_int = 0;
     let mut allocated_buffers: c_int = 0;
-    let mut state = std::mem::MaybeUninit::uninit();
+    let mut state = MaybeUninit::uninit();
     starpu_codelet_pack_arg_init(state.as_mut_ptr());
     let mut state = state.assume_init();
     let mut xrank = -1;
@@ -455,8 +449,8 @@ unsafe fn task_insert_create(
                 starpu_task_insert_data_process_arg(
                     cl,
                     task,
-                    &mut allocated_buffers,
-                    &mut current_buffer,
+                    &raw mut allocated_buffers,
+                    &raw mut current_buffer,
                     mode as c_int,
                     handle,
                 );
@@ -468,8 +462,8 @@ unsafe fn task_insert_create(
                 starpu_task_insert_data_process_array_arg(
                     cl,
                     task,
-                    &mut allocated_buffers,
-                    &mut current_buffer,
+                    &raw mut allocated_buffers,
+                    &raw mut current_buffer,
                     nb_handles,
                     handles,
                 );
@@ -477,23 +471,26 @@ unsafe fn task_insert_create(
             STARPU_VALUE => {
                 let ptr: *mut c_void = varg_list.arg();
                 let ptr_size: usize = varg_list.arg();
-                starpu_codelet_pack_arg(&mut state, ptr, ptr_size)
+                starpu_codelet_pack_arg(&raw mut state, ptr, ptr_size);
             }
             STARPU_PRIORITY => task.priority = varg_list.arg(),
             STARPU_EXECUTE_ON_DATA => {
                 let h = varg_list.arg::<starpu_data_handle_t>();
-                xrank = data_from_handle(h).rank().into()
+                xrank = data_from_handle(h).rank().into();
             }
             STARPU_NAME => task.name = varg_list.arg(),
             STARPU_EXECUTE_ON_NODE => xrank = varg_list.arg::<c_int>(),
             _ => panic!(
-                "Unrecognized argument {}, did you perhaps forget to end arguments with 0?",
-                arg_type
+                "Unrecognized argument {arg_type}, did you perhaps forget to end arguments with 0?"
             ),
         }
     }
     if state.nargs > 0 {
-        starpu_codelet_pack_arg_fini(&mut state, &mut task.cl_arg, &mut task.cl_arg_size);
+        starpu_codelet_pack_arg_fini(
+            &raw mut state,
+            &raw mut task.cl_arg,
+            &raw mut task.cl_arg_size,
+        );
     }
     xrank = find_executee_node(task, xrank);
     assert!(xrank != -1);
@@ -528,7 +525,7 @@ fn barrier() {
     let s = singleton();
     let rank = s.rank();
     let ws = s.world_size();
-    debug!("[{}] Starting barrier", rank);
+    debug!("[{rank}] Starting barrier");
     if rank == 0 {
         for i in 1..ws {
             let r = Req::without_handle(i);
@@ -542,12 +539,12 @@ fn barrier() {
     }
     // there are no starpu task there so we just wait for comms
     wait_for_comms(1);
-    debug!("[{}] Barrier done", rank);
+    debug!("[{rank}] Barrier done");
 }
 
 /// # Safety
 /// Unsafe because var args
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn starpu_mpi_insert_task(
     _comm: MPI_Comm,
     codelet: *mut starpu_codelet,
@@ -558,7 +555,7 @@ pub unsafe extern "C" fn starpu_mpi_insert_task(
 
 /// # Safety
 /// Unsafe because var args
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn starpu_mpi_task_insert(
     _comm: MPI_Comm,
     codelet: *mut starpu_codelet,
@@ -568,7 +565,7 @@ pub unsafe extern "C" fn starpu_mpi_task_insert(
 }
 
 #[doc = "Call starpu_mpi_init_comm() with the MPI communicator \\c MPI_COMM_WORLD."]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn starpu_mpi_init(
     _argc: *mut c_int,
     _argv: *mut *mut *mut c_char,
@@ -578,10 +575,10 @@ pub unsafe extern "C" fn starpu_mpi_init(
     0
 }
 
-#[doc = "Register to MPI a StarPU data handle with the given tag, rank and MPI"]
+#[doc = "Register to MPI a `StarPU` data handle with the given tag, rank and MPI"]
 #[doc = "communicator. It also automatically clears the MPI communication cache"]
 #[doc = "when unregistering the data."]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn starpu_mpi_data_register_comm(
     data_handle: starpu_data_handle_t,
     data_tag: starpu_mpi_tag_t,
@@ -594,19 +591,19 @@ pub unsafe extern "C" fn starpu_mpi_data_register_comm(
         "starpu_mpi_data_register_comm: invalid rank"
     );
     let b = Box::new(HandleData::new(data_tag as Tag, rank as Rank, ws.into()));
-    (*data_handle).mpi_data = Box::into_raw(b) as *mut c_void;
+    (*data_handle).mpi_data = Box::into_raw(b).cast::<c_void>();
     _starpu_data_set_unregister_hook(data_handle, Some(unregister_hook));
 }
 
 #[doc = "Return the rank of the given data."]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn starpu_mpi_data_get_rank(handle: starpu_data_handle_t) -> c_int {
     data_from_handle(handle).rank().into()
 }
 
-#[doc = "Wait until all StarPU tasks and communications for the given"]
+#[doc = "Wait until all `StarPU` tasks and communications for the given"]
 #[doc = "communicator are completed."]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn starpu_mpi_wait_for_all(_comm: MPI_Comm) -> c_int {
     wait_for_all();
     barrier();
@@ -615,25 +612,25 @@ pub unsafe extern "C" fn starpu_mpi_wait_for_all(_comm: MPI_Comm) -> c_int {
 
 #[doc = "Perform a reduction on the given data \\p handle. All nodes send the"]
 #[doc = "data to its owner node which will perform a reduction."]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn starpu_mpi_redux_data(_comm: MPI_Comm, data_handle: starpu_data_handle_t) {
     redux::perform(data_handle);
 }
 
-#[doc = "Clear the send and receive communication cache for all data and"]
-#[doc = "invalidate their values. The function has to be called at the same"]
-#[doc = "point of task graph submission by all the MPI nodes. The function"]
-#[doc = "does nothing if the cache mechanism is disabled (see \\ref"]
-#[doc = "STARPU_MPI_CACHE)."]
-#[no_mangle]
-pub unsafe extern "C" fn starpu_mpi_cache_flush_all_data(_comm: MPI_Comm) {
+/// Clear the send and receive communication cache for all data and invalidate their values.
+///
+/// The function has to be called at the same point of task graph submission by
+/// all the MPI nodes. The function does nothing if the cache mechanism is
+/// disabled (see \ref `STARPU_MPI_CACHE`).
+#[unsafe(no_mangle)]
+pub const unsafe extern "C" fn starpu_mpi_cache_flush_all_data(_comm: MPI_Comm) {
     // Nothing to do here
 }
 
 #[doc = "Transfer data \\p data_handle to MPI node \\p node, sending it from"]
 #[doc = "its owner if needed. At least the target node and the owner have to"]
 #[doc = "call the function."]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn starpu_mpi_get_data_on_node(
     _comm: MPI_Comm,
     handle: starpu_data_handle_t,
@@ -654,25 +651,27 @@ pub unsafe extern "C" fn starpu_mpi_get_data_on_node(
     }
 }
 
-#[doc = "Clean the starpumpi library. This must be called after calling any"]
-#[doc = "\\c starpu_mpi functions and before the call to starpu_shutdown(),"]
-#[doc = "if any. \\c MPI_Finalize() will be called if StarPU-MPI has been"]
-#[doc = "initialized by starpu_mpi_init()."]
-#[no_mangle]
+/// Clean the starpumpi library.
+///
+/// This must be called after calling any `starpu_mpi` functions and before the call to
+/// `starpu_shutdown()`, if any. `MPI_Finalize` will be called if StarPU-MPI has been initialized
+/// by `starpu_mpi_init`.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn starpu_mpi_shutdown() -> c_int {
     singleton().shutdown();
     0
 }
 
-#[doc = "Post a standard-mode, non blocking send of \\p data_handle to the"]
-#[doc = "node \\p dest using the message tag \\p data_tag within the"]
-#[doc = "communicator \\p comm. On completion, the \\p callback function is"]
-#[doc = "called with the argument \\p arg."]
-#[doc = "Similarly to the pthread detached functionality, when a detached"]
-#[doc = "communication completes, its resources are automatically released"]
-#[doc = "back to the system, there is no need to test or to wait for the"]
-#[doc = "completion of the request."]
-#[no_mangle]
+/// Post a standard-mode, non-blocking send of `data_handle` to `dest`.
+///
+/// This function uses the message tag `data_tag` within the communicator `comm`.
+/// On completion, the `callback` function is called with the argument `arg`.
+///
+/// Similarly to the pthread detached functionality, when a detached
+/// communication completes, its resources are automatically released
+/// back to the system; there is no need to test or to wait for the
+/// completion of the request.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn starpu_mpi_isend_detached(
     data_handle: starpu_data_handle_t,
     dest: c_int,
@@ -685,15 +684,16 @@ pub unsafe extern "C" fn starpu_mpi_isend_detached(
     0
 }
 
-#[doc = "Post a nonblocking receive in \\p data_handle from the node \\p"]
-#[doc = "source using the message tag \\p data_tag within the communicator \\p"]
-#[doc = "comm. On completion, the \\p callback function is called with the"]
-#[doc = "argument \\p arg."]
-#[doc = "Similarly to the pthread detached functionality, when a detached"]
-#[doc = "communication completes, its resources are automatically released"]
-#[doc = "back to the system, there is no need to test or to wait for the"]
-#[doc = "completion of the request."]
-#[no_mangle]
+/// Post a non-blocking receive into `data_handle` from the node `source`.
+///
+/// This function uses the message tag `data_tag` within the communicator `comm`.
+/// On completion, the `callback` function is called with the argument `arg`.
+///
+/// Similarly to the pthread detached functionality, when a detached
+/// communication completes, its resources are automatically released
+/// back to the system; there is no need to test or to wait for the
+/// completion of the request.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn starpu_mpi_irecv_detached(
     data_handle: starpu_data_handle_t,
     source: c_int,
@@ -708,7 +708,7 @@ pub unsafe extern "C" fn starpu_mpi_irecv_detached(
 
 #[doc = "Block the caller until all group members of the communicator \\p"]
 #[doc = "comm have called it."]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn starpu_mpi_barrier(_comm: MPI_Comm) -> c_int {
     wait_for_all();
     barrier();
