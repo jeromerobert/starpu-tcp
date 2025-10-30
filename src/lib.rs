@@ -551,9 +551,9 @@ fn barrier() {
 pub unsafe extern "C" fn starpu_mpi_insert_task(
     _comm: MPI_Comm,
     codelet: *mut starpu_codelet,
-    mut args: ...
+    args: ...
 ) -> c_int {
-    task_insert_v(codelet, args.as_va_list())
+    task_insert_v(codelet, args)
 }
 
 /// # Safety
@@ -562,9 +562,9 @@ pub unsafe extern "C" fn starpu_mpi_insert_task(
 pub unsafe extern "C" fn starpu_mpi_task_insert(
     _comm: MPI_Comm,
     codelet: *mut starpu_codelet,
-    mut args: ...
+    args: ...
 ) -> c_int {
-    task_insert_v(codelet, args.as_va_list())
+    task_insert_v(codelet, args)
 }
 
 #[doc = "Call starpu_mpi_init_comm() with the MPI communicator \\c MPI_COMM_WORLD."]
